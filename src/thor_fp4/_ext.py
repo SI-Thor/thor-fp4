@@ -63,7 +63,7 @@ def _decl_core(L):
 
 def _decl_cutlass(L):
     L.tfc4_gemm.argtypes = [ctypes.c_int, c_void, c_void, c_void, c_void, c_void,
-                            i64, i64, i64, ctypes.c_int, c_void]
+                            i64, i64, i64, ctypes.c_float, c_void]
     L.tfc4_gemm.restype = ctypes.c_int
     L.tfc4_n_variants.argtypes = []
     L.tfc4_n_variants.restype = ctypes.c_int

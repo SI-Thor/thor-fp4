@@ -1,0 +1,12 @@
+# thor-fp4 bench_batch  cublasLt=130401  load=10.22 mem_avail=113GiB
+#    B |  bf16 eager  bf16 graph |   fp4 eager   fp4 graph | best dec/s
+   1 |    143.7 us     29.9 us |    284.3 us     45.2 us |      33473
+   2 |    143.1 us     27.6 us |    355.2 us     46.0 us |      72553
+   4 |    138.5 us     17.0 us |    415.2 us     47.4 us |     234904
+   8 |    151.2 us     16.8 us |    359.9 us     47.5 us |     475195
+  16 |    134.0 us     17.2 us |    356.0 us     47.7 us |     932082
+  32 |    151.0 us     19.1 us |    398.7 us     51.5 us |    1677946
+  64 |     93.5 us     24.6 us |    408.7 us     55.6 us |    2603263
+ 128 |     99.2 us     25.2 us |    388.9 us     64.2 us |    5071637
+ 256 |    106.1 us     31.4 us |    374.8 us    160.3 us |    8146640
+# load=8.22 mem_avail=107GiB

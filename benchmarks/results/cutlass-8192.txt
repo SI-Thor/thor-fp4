@@ -1,0 +1,13 @@
+# CUTLASS bench  M=8192 N=8192 K=8192 iters=10 load=6.06
+# variant                        relRMS          ms    TFLOPS   status
+# nvfp4_128x128x256_c1         1.60e-03      10.203     107.8       OK
+# nvfp4_128x128x256_c1_a32     1.60e-03      16.409      67.0       OK
+# nvfp4_128x128x256_c2x1       1.60e-03      13.150      83.6       OK
+# nvfp4_128x256x256_c2x1       1.60e-03      11.089      99.1       OK
+# nvfp4_128x128x128_c1         1.60e-03      10.687     102.9       OK
+# nvfp4_128x128x64_c1          1.60e-03      15.350      71.6       OK
+# mxfp8xfp4_128x128x256_c1     1.67e-03      13.003      84.6       OK
+# mxfp8xfp4_128x128x256_c2x1   1.67e-03      23.106      47.6       OK
+# mxfp8xfp4_128x256x256_c2x1   1.67e-03      19.882      55.3       OK
+# mxfp4_128x128x256_c1         1.00e+00      24.883      44.2       OK
+# mxfp4_128x128x256_c2x1       1.00e+00      24.012      45.8       OK

@@ -55,14 +55,20 @@ def nvfp4_fake_quant(x: torch.Tensor, tensor_scale: float = 1.0, blk: int = 16) 
 
 def mx_fake_quant(x: torch.Tensor, kind: str = "mxfp4", blk: int = 32) -> torch.Tensor:
     """MX fake quant (e2m1 or e4m3 codes, UE8M0 = power-of-two scale per 32),
-    matching tfp4_quant_mx: scale = 2^round(log2(amax/maxval))."""
+    matching tfp4_quant_mx bit-for-bit: the scale is round-to-nearest-power-
+    of-two with midpoint ties UP (frexp-based, like the device kernel —
+    torch's round() is half-to-even and flips ties the other way)."""
     assert kind in ("mxfp4", "mxfp8")
     shp = x.shape
     xv = x.reshape(-1, blk).float()
     amax = xv.abs().amax(dim=1, keepdim=True)
     maxval = 6.0 if kind == "mxfp4" else 448.0
-    e = torch.log2(amax / maxval).round().clamp(-127, 127)
-    ds = torch.pow(2.0, e)
+    v = amax / maxval
+    _, e = torch.frexp(v)
+    lo = torch.ldexp(torch.ones_like(v), e - 1)
+    hi = lo * 2
+    code = torch.where(v - lo < hi - v, e - 1, e).clamp(-127, 127)
+    ds = torch.ldexp(torch.ones_like(v), code)
     safe = ds.clamp_min(1e-30)
     q = xv / safe
     if kind == "mxfp4":
@@ -76,20 +82,23 @@ def mx_fake_quant(x: torch.Tensor, kind: str = "mxfp4", blk: int = 32) -> torch.
 
 
 class STE(torch.autograd.Function):
-    """Straight-through estimator: identity gradient through fake quant."""
+    """Straight-through estimator: fake-quantized forward, identity gradient.
+    The quantization must live INSIDE the autograd.Function — computing it
+    eagerly outside and wrapping the result would leave the graph running
+    through bucketize/division, whose gradients are zero or wrong."""
 
     @staticmethod
-    def forward(ctx, x):
-        return x
+    def forward(ctx, x, tensor_scale=1.0):
+        return nvfp4_fake_quant(x, tensor_scale)
 
     @staticmethod
     def backward(ctx, g):
-        return g
+        return g, None
 
 
 def qat(x: torch.Tensor, tensor_scale: float = 1.0) -> torch.Tensor:
     """NVFP4 fake-quant with STE (identity backward)."""
-    return STE.apply(nvfp4_fake_quant(x, tensor_scale))
+    return STE.apply(x, tensor_scale)
 
 
 class QATLinear(nn.Linear):

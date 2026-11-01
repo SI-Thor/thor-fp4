@@ -1,0 +1,94 @@
+# CUTLASS suite  date=2026-10-31 17:28:57  load=7.64  mem_avail=106GiB
+
+== all variants at 8192^3 (correctness vs FP64 host ref + timing) ==
+# CUTLASS bench  M=8192 N=8192 K=8192 iters=10 load=7.64
+# variant                        relRMS          ms    TFLOPS   status
+# nvfp4_128x128x256_c1         1.60e-03      10.846     101.4       OK
+# nvfp4_128x128x256_c1_a32     1.60e-03      10.541     104.3       OK
+# nvfp4_128x128x256_c2x1       1.60e-03      10.641     103.3       OK
+# nvfp4_128x256x256_c2x1       1.60e-03       5.665     194.1       OK
+# nvfp4_128x128x128_c1         1.60e-03      11.095      99.1       OK
+# nvfp4_128x128x64_c1          1.60e-03      15.722      69.9       OK
+# mxfp8xfp4_128x128x256_c1     1.67e-03       9.881     111.3       OK
+# mxfp8xfp4_128x128x256_c2x1   1.67e-03      19.778      55.6       OK
+# mxfp8xfp4_128x256x256_c2x1   1.67e-03      19.877      55.3       OK
+# mxfp4_128x128x256_c1         1.00e+00      10.315     106.6       OK
+# mxfp4_128x128x256_c2x1       1.00e+00      10.101     108.9       OK
+
+== small-K landscape M=4096 (does a tuned own kernel beat cuBLASLt's small-K?) ==
+-- N=960 K=320
+# CUTLASS bench  M=4096 N=960 K=320 iters=20 load=5.93
+# variant                        relRMS          ms    TFLOPS   status
+# nvfp4_128x128x256_c1         1.57e-03       0.031      80.2       OK
+# CUTLASS bench  M=4096 N=960 K=320 iters=20 load=5.93
+# variant                        relRMS          ms    TFLOPS   status
+# nvfp4_128x128x64_c1          1.57e-03       0.029      85.3       OK
+# CUTLASS bench  M=4096 N=960 K=320 iters=20 load=5.85
+# variant                        relRMS          ms    TFLOPS   status
+# mxfp8xfp4_128x128x256_c1            -           -         -     SKIP  (rc=-20 no error)
+-- N=2560 K=320
+# CUTLASS bench  M=4096 N=2560 K=320 iters=20 load=5.85
+# variant                        relRMS          ms    TFLOPS   status
+# nvfp4_128x128x256_c1         1.62e-03       0.087      76.8       OK
+# CUTLASS bench  M=4096 N=2560 K=320 iters=20 load=5.85
+# variant                        relRMS          ms    TFLOPS   status
+# nvfp4_128x128x64_c1          1.62e-03       0.090      74.9       OK
+# CUTLASS bench  M=4096 N=2560 K=320 iters=20 load=5.85
+# variant                        relRMS          ms    TFLOPS   status
+# mxfp8xfp4_128x128x256_c1            -           -         -     SKIP  (rc=-20 no error)
+-- N=1920 K=640
+# CUTLASS bench  M=4096 N=1920 K=640 iters=20 load=5.85
+# variant                        relRMS          ms    TFLOPS   status
+# nvfp4_128x128x256_c1         1.62e-03       0.068     149.0       OK
+# CUTLASS bench  M=4096 N=1920 K=640 iters=20 load=5.87
+# variant                        relRMS          ms    TFLOPS   status
+# nvfp4_128x128x64_c1          1.62e-03       0.073     137.3       OK
+# CUTLASS bench  M=4096 N=1920 K=640 iters=20 load=5.87
+# variant                        relRMS          ms    TFLOPS   status
+# mxfp8xfp4_128x128x256_c1     1.64e-03       0.072     139.6       OK
+-- N=320 K=2560
+# CUTLASS bench  M=4096 N=320 K=2560 iters=20 load=5.87
+# variant                        relRMS          ms    TFLOPS   status
+# nvfp4_128x128x256_c1         1.54e-03       0.028     235.8       OK
+# CUTLASS bench  M=4096 N=320 K=2560 iters=20 load=5.80
+# variant                        relRMS          ms    TFLOPS   status
+# nvfp4_128x128x64_c1          1.54e-03       0.053     126.7       OK
+# CUTLASS bench  M=4096 N=320 K=2560 iters=20 load=5.80
+# variant                        relRMS          ms    TFLOPS   status
+# mxfp8xfp4_128x128x256_c1     1.58e-03       0.041     163.8       OK
+-- N=5120 K=1280
+# CUTLASS bench  M=4096 N=5120 K=1280 iters=20 load=5.57
+# variant                        relRMS          ms    TFLOPS   status
+# nvfp4_128x128x256_c1         1.65e-03       0.225     238.9       OK
+# CUTLASS bench  M=4096 N=5120 K=1280 iters=20 load=5.57
+# variant                        relRMS          ms    TFLOPS   status
+# nvfp4_128x128x64_c1          1.65e-03       0.332     161.7       OK
+# CUTLASS bench  M=4096 N=5120 K=1280 iters=20 load=5.57
+# variant                        relRMS          ms    TFLOPS   status
+# mxfp8xfp4_128x128x256_c1     1.64e-03       0.319     168.3       OK
+-- N=1280 K=5120
+# CUTLASS bench  M=4096 N=1280 K=5120 iters=20 load=6.41
+# variant                        relRMS          ms    TFLOPS   status
+# nvfp4_128x128x256_c1         1.59e-03       0.179     300.3       OK
+# CUTLASS bench  M=4096 N=1280 K=5120 iters=20 load=6.41
+# variant                        relRMS          ms    TFLOPS   status
+# nvfp4_128x128x64_c1          1.59e-03       0.289     185.6       OK
+# CUTLASS bench  M=4096 N=1280 K=5120 iters=20 load=6.29
+# variant                        relRMS          ms    TFLOPS   status
+# mxfp8xfp4_128x128x256_c1     1.72e-03       0.280     191.9       OK
+
+== mixed MXFP8xMXFP4 across shapes (the path cuBLASLt refuses) ==
+# CUTLASS bench  M=8192 N=8192 K=8192 iters=10 load=6.35
+# variant                        relRMS          ms    TFLOPS   status
+# mxfp8xfp4_128x128x256_c1     1.67e-03      10.205     107.7       OK
+# CUTLASS bench  M=4096 N=5120 K=5120 iters=10 load=5.91
+# variant                        relRMS          ms    TFLOPS   status
+# mxfp8xfp4_128x128x256_c1     1.63e-03       2.395      89.7       OK
+# CUTLASS bench  M=256 N=8192 K=8192 iters=10 load=5.68
+# variant                        relRMS          ms    TFLOPS   status
+# mxfp8xfp4_128x128x256_c1     1.61e-03       0.199     172.8       OK
+# CUTLASS bench  M=4096 N=5120 K=1280 iters=10 load=5.62
+# variant                        relRMS          ms    TFLOPS   status
+# mxfp8xfp4_128x128x256_c1     1.64e-03       0.314     171.2       OK
+
+# cuBLASLt vs CUTLASS nvfp4 on identical packed inputs (2048x2048x2048): relRMS=1.684e-03  load 5.62

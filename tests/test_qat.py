@@ -11,6 +11,17 @@ from conftest import requires_cuda, rrms
 
 
 @requires_cuda
+def test_ste_gradient_is_identity():
+    # the STE must pass gradients unchanged: a broken version that builds the
+    # graph through bucketize kills them (found by bench_quality, kept as a
+    # regression test)
+    x = torch.randn(64, 128, device="cuda", requires_grad=True)
+    y = thor_fp4.qat(x)
+    y.sum().backward()
+    assert torch.equal(x.grad, torch.ones_like(x))
+
+
+@requires_cuda
 def test_qat_linear_trains():
     torch.manual_seed(0)
     teacher = nn.Linear(256, 128).cuda()

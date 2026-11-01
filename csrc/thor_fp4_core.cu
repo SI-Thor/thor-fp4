@@ -58,6 +58,7 @@
 #include <map>
 #include <mutex>
 #include <tuple>
+#include <type_traits>
 
 #define CK(x) do { cudaError_t e_=(x); if(e_!=cudaSuccess){ \
     fprintf(stderr,"thor_fp4 CUDA err %s @%d\n",cudaGetErrorString(e_),__LINE__); return -1;} } while(0)
@@ -110,6 +111,9 @@ __device__ __forceinline__ uint8_t ue8m0_enc(float v) {
 __device__ __forceinline__ float2 half2_to_float2(__half2 h) {
     return __half22float2(h);
 }
+__device__ __forceinline__ float2 bf2_to_float2(__nv_bfloat162 h) {
+    return __bfloat1622float2(h);
+}
 
 // ---------------------------------------------------------------------------
 // NVFP4 quantize: one block per (row, segment of scale groups). Reads 16
@@ -137,17 +141,27 @@ __global__ void quant_nv_plain(const T* __restrict__ x, int64_t K,
 #pragma unroll
             for (int i = 0; i < 4; ++i) { f[4*i] = vv[i].x; f[4*i+1] = vv[i].y; f[4*i+2] = vv[i].z; f[4*i+3] = vv[i].w; }
         } else {
-            // 16-bit dtypes (half / __nv_bfloat16): 2x uint4 = 16 elements
+            // 16-bit dtypes (half / __nv_bfloat16): 2x uint4 = 16 elements;
+            // the two dtypes need their own pair->float conversions
             const uint4* blk = (const uint4*)(row + s * 16);
             uint4 w0 = blk[0], w1 = blk[1];
             const uint4 ww[2] = {w0, w1};
 #pragma unroll
             for (int i = 0; i < 2; ++i) {
-                const __half2* hh = (const __half2*)&ww[i];
+                if constexpr (std::is_same_v<T, __half>) {
+                    const __half2* hh = (const __half2*)&ww[i];
 #pragma unroll
-                for (int j = 0; j < 4; ++j) {
-                    float2 ff = half2_to_float2(hh[j]);
-                    f[8*i + 2*j] = ff.x; f[8*i + 2*j + 1] = ff.y;
+                    for (int j = 0; j < 4; ++j) {
+                        float2 ff = half2_to_float2(hh[j]);
+                        f[8*i + 2*j] = ff.x; f[8*i + 2*j + 1] = ff.y;
+                    }
+                } else {
+                    const __nv_bfloat162* bb = (const __nv_bfloat162*)&ww[i];
+#pragma unroll
+                    for (int j = 0; j < 4; ++j) {
+                        float2 ff = bf2_to_float2(bb[j]);
+                        f[8*i + 2*j] = ff.x; f[8*i + 2*j + 1] = ff.y;
+                    }
                 }
             }
         }
@@ -156,10 +170,13 @@ __global__ void quant_nv_plain(const T* __restrict__ x, int64_t K,
         for (int i = 0; i < 16; ++i) amax = fmaxf(amax, fabsf(f[i]));
         // two-level recipe: with a per-tensor scale ts, block scales
         // amax/(6*ts) sit near the top of the UE4M3 range for wide-range
-        // tensors; ts == 1 is the block-only scheme
+        // tensors; ts == 1 is the block-only scheme. sflat stores the RAW
+        // sf byte value (not sf*ts): the reblock pass re-encodes it, and
+        // encode(decode(x)) is only idempotent for raw scale values
         uint8_t sc = e4m3_enc_pos(amax * (1.0f / 6.0f) / ts);
-        float ds = e4m3_dec(sc) * ts;
-        srow[s] = ds;
+        float sf = e4m3_dec(sc);
+        srow[s] = sf;
+        float ds = sf * ts;   // the codes below were divided by ds
         uint8_t* dst = prow + s * 8;
 #pragma unroll
         for (int i = 0; i < 8; ++i) {
@@ -225,11 +242,20 @@ __global__ void quant_mx(const T* __restrict__ x, int64_t K, int kind,
 #pragma unroll
             for (int i = 0; i < 4; ++i) {
                 uint4 w = blk[i];
-                const __half2* hh = (const __half2*)&w;
+                if constexpr (std::is_same_v<T, __half>) {
+                    const __half2* hh = (const __half2*)&w;
 #pragma unroll
-                for (int j = 0; j < 4; ++j) {
-                    float2 ff = half2_to_float2(hh[j]);
-                    f[8*i + 2*j] = ff.x; f[8*i + 2*j + 1] = ff.y;
+                    for (int j = 0; j < 4; ++j) {
+                        float2 ff = half2_to_float2(hh[j]);
+                        f[8*i + 2*j] = ff.x; f[8*i + 2*j + 1] = ff.y;
+                    }
+                } else {
+                    const __nv_bfloat162* bb = (const __nv_bfloat162*)&w;
+#pragma unroll
+                    for (int j = 0; j < 4; ++j) {
+                        float2 ff = bf2_to_float2(bb[j]);
+                        f[8*i + 2*j] = ff.x; f[8*i + 2*j + 1] = ff.y;
+                    }
                 }
             }
         }

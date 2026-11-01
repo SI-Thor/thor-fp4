@@ -22,9 +22,37 @@ import torch
 import torch.nn as nn
 
 from . import ops
-from .ops import NVFP4Tensor
+from .ops import NVFP4Tensor, MXTensor
 
 __all__ = ["Linear"]
+
+_DEFAULT_CUTLASS_VARIANTS = ["nvfp4_128x256x256_c2x1", "nvfp4_128x128x256_c1"]
+
+
+def _resolve_engine(engine: str):
+    """'cublaslt' | 'cutlass' | 'cutlass:<variant-name>' -> (kind, variant_idx).
+
+    kind: 'lt' (cuBLASLt NVFP4), 'nv' (CUTLASS NVFP4xNVFP4), 'mx8' (CUTLASS
+    MXFP8 activations x MXFP4 weights — the mix cuBLASLt refuses)."""
+    if engine == "cublaslt":
+        return "lt", -1
+    from . import _ext
+    L = _ext.cutlass()
+    if L is None:
+        raise RuntimeError("engine='cutlass*' needs build/libthorfp4_cutlass.so (make cutlass)")
+    if engine == "cutlass":
+        names = [bytes(L.tfc4_variant_name(i)).decode() for i in range(L.tfc4_n_variants())]
+        name = next((c for c in _DEFAULT_CUTLASS_VARIANTS if c in names),
+                    next(n for n in names if n.startswith("nvfp4_")))
+    elif engine.startswith("cutlass:"):
+        name = engine.split(":", 1)[1]
+    else:
+        raise ValueError(f"unknown engine {engine!r}")
+    idx = L.tfc4_variant_index(name.encode())
+    if idx < 0:
+        raise ValueError(f"unknown cutlass variant {name!r}")
+    kind = "mx8" if name.startswith("mxfp8") else "nv"
+    return kind, idx
 
 
 class Linear(nn.Module):
@@ -50,7 +78,8 @@ class Linear(nn.Module):
 
     def __init__(self, in_features: int, out_features: int, bias: bool = True,
                  device=None, dtype=None, out_dtype: str = "f16",
-                 tensor_scale: float | None = None, act_tensor_scale: float = 1.0):
+                 tensor_scale: float | None = None, act_tensor_scale: float = 1.0,
+                 engine: str = "cublaslt"):
         super().__init__()
         if in_features % 64 != 0:
             raise ValueError(
@@ -61,9 +90,13 @@ class Linear(nn.Module):
                 f"out_features={out_features}: NVFP4 needs N >= 8 and N % 8 == 0")
         self.in_features = in_features
         self.out_features = out_features
+        self.engine_kind, self.engine_variant = _resolve_engine(engine)
+        if self.engine_kind != "lt":
+            out_dtype = "bf16"          # the CUTLASS epilogues are BF16
         self.out_dtype = out_dtype
         self.act_tensor_scale = float(act_tensor_scale)
         self._weight_fp4: NVFP4Tensor | None = None
+        _ = dtype
         self._tensor_scale_requested = tensor_scale
         self.weight = nn.Parameter(torch.empty(out_features, in_features, device=device))
         if bias:
@@ -88,8 +121,11 @@ class Linear(nn.Module):
 
     def refresh_weight(self):
         """Re-quantize the master weight (call after in-place weight edits)."""
-        w = self.weight.detach().contiguous()
-        self._weight_fp4 = NVFP4Tensor.from_float(w, self._tensor_scale_requested)
+        w = self.weight.detach().contiguous().float()
+        if self.engine_kind == "mx8":
+            self._weight_fp4 = MXTensor.from_float(w, "mxfp4")
+        else:
+            self._weight_fp4 = NVFP4Tensor.from_float(w, self._tensor_scale_requested)
         return self
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -111,10 +147,14 @@ class Linear(nn.Module):
             key = (M, dt)
             bufs = self._act_bufs.get(key)
             if bufs is None:
-                packed = torch.zeros(ops.packed_bytes(M, self.in_features),
-                                     dtype=torch.uint8, device=x.device)
-                sblk = torch.zeros(ops.scale_bytes(M, self.in_features),
-                                   dtype=torch.uint8, device=x.device)
+                if self.engine_kind == "mx8":
+                    pb = ops.mx_packed_bytes(M, self.in_features, "mxfp8")
+                    sb = ops.mx_scale_bytes(M, self.in_features)
+                else:
+                    pb = ops.packed_bytes(M, self.in_features)
+                    sb = ops.scale_bytes(M, self.in_features)
+                packed = torch.zeros(pb, dtype=torch.uint8, device=x.device)
+                sblk = torch.zeros(sb, dtype=torch.uint8, device=x.device)
                 out = torch.empty(M, self.out_features,
                                   dtype={"f16": torch.float16, "bf16": torch.bfloat16,
                                          "f32": torch.float32}[self.out_dtype],
@@ -122,10 +162,31 @@ class Linear(nn.Module):
                 bufs = (packed, sblk, out)
                 self._act_bufs[key] = bufs
             packed, sblk, out = bufs
-            ops.quantize_nvfp4(x, self.act_tensor_scale, packed, sblk)
-            ops.gemm(packed, sblk, self.act_tensor_scale,
-                     w.packed, w.sblk, w.tensor_scale,
-                     out, M, self.out_features, self.in_features, self.out_dtype)
+            if self.engine_kind == "lt":
+                ops.quantize_nvfp4(x, self.act_tensor_scale, packed, sblk)
+                ops.gemm(packed, sblk, self.act_tensor_scale,
+                         w.packed, w.sblk, w.tensor_scale,
+                         out, M, self.out_features, self.in_features, self.out_dtype)
+            elif self.engine_kind == "nv":
+                # CUTLASS NVFP4: same operand encoding as the cuBLASLt path,
+                # our kernel; alpha carries the two-level tensor scales
+                from . import _ext
+                ops.quantize_nvfp4(x, self.act_tensor_scale, packed, sblk)
+                rc = _ext.cutlass().tfc4_gemm(
+                    self.engine_variant, packed.data_ptr(), sblk.data_ptr(),
+                    w.packed.data_ptr(), w.sblk.data_ptr(), out.data_ptr(),
+                    M, self.out_features, self.in_features,
+                    self.act_tensor_scale * w.tensor_scale, _ext.stream())
+                assert rc == 0, f"tfc4_gemm rc={rc}"
+            else:
+                # MXFP8 activations x MXFP4 weights: the mix cuBLASLt refuses
+                from . import _ext
+                ops.quantize_mx(x, "mxfp8", packed, sblk)
+                rc = _ext.cutlass().tfc4_gemm(
+                    self.engine_variant, packed.data_ptr(), sblk.data_ptr(),
+                    w.packed.data_ptr(), w.sblk.data_ptr(), out.data_ptr(),
+                    M, self.out_features, self.in_features, 1.0, _ext.stream())
+                assert rc == 0, f"tfc4_gemm rc={rc}"
             if self.bias is not None:
                 out += self.bias.to(out.dtype)
             return out
@@ -133,8 +194,9 @@ class Linear(nn.Module):
     def extra_repr(self) -> str:
         ts = (self._weight_fp4.tensor_scale if self._weight_fp4 is not None
               else self._tensor_scale_requested)
+        eng = "cublaslt" if self.engine_kind == "lt" else f"cutlass:{self.engine_variant}"
         return (f"in={self.in_features}, out={self.out_features}, bias={self.bias is not None}, "
-                f"out_dtype={self.out_dtype}, tensor_scale={ts}")
+                f"out_dtype={self.out_dtype}, tensor_scale={ts}, engine={eng}")
 
     def fp4_weight_nbytes(self) -> int:
         """Bytes of the resident weight (codes + block scales)."""

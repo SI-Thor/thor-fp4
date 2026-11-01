@@ -1,0 +1,31 @@
+diff --git a/include/cutlass/arch/arch.h b/include/cutlass/arch/arch.h
+index faaab62..b8ac081 100644
+--- a/include/cutlass/arch/arch.h
++++ b/include/cutlass/arch/arch.h
+@@ -113,6 +113,13 @@ struct Sm103 {
+   static int const kMinComputeCapability = 103; 
+ };
+ 
++// lab-fp4: Thor's GPU is sm_110 (GB10). tcgen05 block-scaled MMA (kind::mxf4nvf4,
++// cta_group::1) is enabled for it in cute/arch/config.hpp; this tag lets the
++// sm_100 collective builders be reused for it.
++struct Sm110 {
++  static int const kMinComputeCapability = 110; 
++};
++
+ /// Triggers a breakpoint on the device
+ CUTLASS_DEVICE
+ void device_breakpoint() {
+diff --git a/include/cutlass/gemm/collective/builders/sm100_blockscaled_umma_builder.inl b/include/cutlass/gemm/collective/builders/sm100_blockscaled_umma_builder.inl
+index 923ce9c..2203cd7 100644
+--- a/include/cutlass/gemm/collective/builders/sm100_blockscaled_umma_builder.inl
++++ b/include/cutlass/gemm/collective/builders/sm100_blockscaled_umma_builder.inl
+@@ -120,7 +120,7 @@ struct CollectiveBuilder<
+     StageCountType,
+     BuilderScheduleTag,
+     cute::enable_if_t<
+-      (cute::is_same_v<ArchTag, arch::Sm100> 
++      (cute::is_same_v<ArchTag, arch::Sm100> || cute::is_same_v<ArchTag, arch::Sm110>
+       ) &&
+       // Blockscaled Gemm
+       (not cute::is_same_v<KernelMixedTmaCpAsyncWarpSpecialized1SmBlockScaledSm100, BuilderScheduleTag>) &&

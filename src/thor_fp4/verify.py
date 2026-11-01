@@ -69,14 +69,21 @@ class ReferenceLinear(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         layer = self.layer
-        if layer._weight_fp4 is None:
-            layer.refresh_weight()
-        w = layer._weight_fp4.dequantize()                    # f32 (N, K)
         xc = x.detach().contiguous()
         if xc.dtype not in (torch.float32, torch.float16, torch.bfloat16):
             xc = xc.float()
-        packed, sblk = ops.quantize_nvfp4(xc.float(), layer.act_tensor_scale)
-        xd = ops.dequantize_nvfp4(packed, sblk, layer.act_tensor_scale, *xc.shape)
+        if getattr(layer, "engine_kind", "lt") == "mx8":
+            # MX operands: the reference runs the torch fake-quant arithmetic
+            # (e2m1/e4m3 codes with UE8M0 per-32 scales) and an FP32 matmul
+            from .quant import mx_fake_quant
+            xd = mx_fake_quant(xc.float(), "mxfp8")
+            w = mx_fake_quant(layer.weight.detach().float(), "mxfp4")
+        else:
+            if layer._weight_fp4 is None:
+                layer.refresh_weight()
+            w = layer._weight_fp4.dequantize()                    # f32 (N, K)
+            packed, sblk = ops.quantize_nvfp4(xc.float(), layer.act_tensor_scale)
+            xd = ops.dequantize_nvfp4(packed, sblk, layer.act_tensor_scale, *xc.shape)
         out = xd @ w.t()
         if layer.bias is not None:
             out = out + layer.bias.float()

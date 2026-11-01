@@ -43,11 +43,9 @@ build/libthorfp4_cutlass.so: csrc/cutlass_kernels.cu | build
 
 cutlass: build/libthorfp4_cutlass.so
 
-build/bench_cutlass: csrc/cutlass_kernels.cu csrc/bench_main.cu | build
-	@test -n "$(CUTLASS_DIRS)" || { echo "CUTLASS not found: set CUTLASS_ROOT or run scripts/fetch-cutlass.sh"; exit 1; }
-	$(NVCC) $(ARCHA) -O2 -std=c++17 --expt-relaxed-constexpr \
-	    -I$(CUTLASS_DIRS)/include -I$(CUTLASS_DIRS)/tools/util/include \
-	    -o $@ csrc/cutlass_kernels.cu csrc/bench_main.cu -lcublasLt
+build/bench_cutlass: csrc/bench_main.cu build/libthorfp4_cutlass.so
+	$(NVCC) $(ARCHA) -O2 -std=c++17 -Xlinker -rpath=\$$ORIGIN \
+	    -o $@ csrc/bench_main.cu -Lbuild -lthorfp4_cutlass
 
 bench-cutlass: build/bench_cutlass
 
