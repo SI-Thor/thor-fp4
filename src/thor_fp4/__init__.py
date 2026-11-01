@@ -15,7 +15,7 @@ __version__ = "0.1.0"
 from . import ops
 from ._ext import cublaslt_version
 from .linear import Linear
-from .ops import NVFP4Tensor, MXTensor, gemm, quantize_nvfp4, quantize_mx, dequantize_nvfp4
+from .ops import NVFP4Tensor, MXTensor, gemm, gemv, quantize_nvfp4, quantize_mx, dequantize_nvfp4
 from .quant import (QATLinear, QATSequential, calibrate_linear, mx_fake_quant,
                     nvfp4_fake_quant, qat, two_level_scale)
 from .convert import auto_decision, calibrate, convert, load_shape_table
@@ -26,7 +26,7 @@ from .certify import FinalLayerCertificate, certified_forward
 
 __all__ = [
     "Linear", "NVFP4Tensor", "MXTensor", "ops",
-    "quantize_nvfp4", "quantize_mx", "dequantize_nvfp4", "gemm",
+    "quantize_nvfp4", "quantize_mx", "dequantize_nvfp4", "gemm", "gemv",
     "nvfp4_fake_quant", "mx_fake_quant", "qat", "two_level_scale",
     "QATLinear", "QATSequential", "calibrate_linear",
     "convert", "calibrate", "auto_decision", "load_shape_table",

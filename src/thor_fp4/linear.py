@@ -30,12 +30,15 @@ _DEFAULT_CUTLASS_VARIANTS = ["nvfp4_128x256x256_c2x1", "nvfp4_128x128x256_c1"]
 
 
 def _resolve_engine(engine: str):
-    """'cublaslt' | 'cutlass' | 'cutlass:<variant-name>' -> (kind, variant_idx).
+    """'cublaslt' | 'gemv' | 'cutlass' | 'cutlass:<variant-name>' -> (kind, variant_idx).
 
-    kind: 'lt' (cuBLASLt NVFP4), 'nv' (CUTLASS NVFP4xNVFP4), 'mx8' (CUTLASS
-    MXFP8 activations x MXFP4 weights — the mix cuBLASLt refuses)."""
+    kind: 'lt' (cuBLASLt NVFP4), 'gv' (register-dequant GEMV, M<=8),
+    'nv' (CUTLASS NVFP4xNVFP4), 'mx8' (CUTLASS MXFP8 activations x MXFP4
+    weights — the mix cuBLASLt refuses)."""
     if engine == "cublaslt":
         return "lt", -1
+    if engine == "gemv":
+        return "gv", -1
     from . import _ext
     L = _ext.cutlass()
     if L is None:
@@ -74,6 +77,9 @@ class Linear(nn.Module):
         act_tensor_scale: per-tensor scale for activations, 1.0 (default,
             dynamic block scales only) or a calibrated static value from
             thor_fp4.calibrate().
+        engine: 'cublaslt' (default) | 'gemv' — the register-dequant GEMV,
+            the bandwidth-bound path for batch M <= 8 (weights stream at FP4
+            density; activations are NOT quantized) | 'cutlass[:variant]'.
     """
 
     def __init__(self, in_features: int, out_features: int, bias: bool = True,
@@ -91,7 +97,7 @@ class Linear(nn.Module):
         self.in_features = in_features
         self.out_features = out_features
         self.engine_kind, self.engine_variant = _resolve_engine(engine)
-        if self.engine_kind != "lt":
+        if self.engine_kind in ("nv", "mx8"):
             out_dtype = "bf16"          # the CUTLASS epilogues are BF16
         self.out_dtype = out_dtype
         self.act_tensor_scale = float(act_tensor_scale)
@@ -105,6 +111,7 @@ class Linear(nn.Module):
             self.register_parameter("bias", None)
         self.reset_parameters()
         self._act_bufs: dict[tuple[int, torch.dtype], tuple[torch.Tensor, torch.Tensor, torch.Tensor]] = {}
+        self._gemv_outs: dict[tuple[int, torch.dtype], torch.Tensor] = {}
 
     def reset_parameters(self):
         # keep the fp32 master weight; NVFP4 copy is (re)built lazily so
@@ -117,6 +124,7 @@ class Linear(nn.Module):
     def _apply(self, fn, recurse=True):
         self._weight_fp4 = None
         self._act_bufs = {}
+        self._gemv_outs = {}
         return super()._apply(fn, recurse)
 
     def refresh_weight(self):
@@ -145,6 +153,23 @@ class Linear(nn.Module):
                 x = x.float()
                 dt = torch.float32
             key = (M, dt)
+            if self.engine_kind == "gv":
+                # register-dequant GEMV: no activation quantize buffers; the
+                # weights stream at FP4 density and the activations read exact
+                if M > 8:
+                    raise RuntimeError(
+                        f"engine='gemv' serves M <= 8 (got {M}); use engine='cublaslt'")
+                out = self._gemv_outs.get(key)
+                if out is None:
+                    out = torch.empty(M, self.out_features,
+                                      dtype={"f16": torch.float16, "bf16": torch.bfloat16,
+                                             "f32": torch.float32}[self.out_dtype],
+                                      device=x.device)
+                    self._gemv_outs[key] = out
+                ops.gemv(x, w, self.out_dtype, out=out)
+                if self.bias is not None:
+                    out += self.bias.to(out.dtype)
+                return out
             bufs = self._act_bufs.get(key)
             if bufs is None:
                 if self.engine_kind == "mx8":
@@ -194,7 +219,8 @@ class Linear(nn.Module):
     def extra_repr(self) -> str:
         ts = (self._weight_fp4.tensor_scale if self._weight_fp4 is not None
               else self._tensor_scale_requested)
-        eng = "cublaslt" if self.engine_kind == "lt" else f"cutlass:{self.engine_variant}"
+        eng = {"lt": "cublaslt", "gv": "gemv"}.get(
+            self.engine_kind, f"cutlass:{self.engine_variant}")
         return (f"in={self.in_features}, out={self.out_features}, bias={self.bias is not None}, "
                 f"out_dtype={self.out_dtype}, tensor_scale={ts}, engine={eng}")
 

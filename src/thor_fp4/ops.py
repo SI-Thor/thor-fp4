@@ -16,7 +16,7 @@ from . import _ext
 __all__ = [
     "pad_rows", "packed_bytes", "scale_bytes", "mx_packed_bytes", "mx_scale_bytes",
     "quantize_nvfp4", "quantize_mx", "dequantize_nvfp4", "block_scales",
-    "gemm", "NVFP4Tensor", "MXTensor",
+    "gemm", "gemv", "NVFP4Tensor", "MXTensor",
 ]
 
 
@@ -124,6 +124,28 @@ def gemm(packedA: torch.Tensor, sblkA: torch.Tensor, tsA: float,
     assert rc == 0, f"tfp4_gemm rc={rc}"
 
 
+def gemv(x: torch.Tensor, w: "NVFP4Tensor", out_dtype: str = "f32",
+         out: torch.Tensor | None = None) -> torch.Tensor:
+    """out (M, N) = x (M, K) @ dequant(w)^T for M <= 8 — the register-dequant
+    GEMV (DIRECTIONS.md §2). Bandwidth-bound small-batch path: the packed
+    e2m1 weights are streamed once and dequantized in registers, so the layer
+    costs the FP4 weight bytes, not the BF16 ones. Activations are read
+    exactly (f32/f16/bf16 — never quantized); accumulation is FP32."""
+    L = _ext.core()
+    M, K = x.shape
+    N = w.shape[0]
+    assert w.shape[1] == K
+    assert x.ndim == 2 and x.is_cuda and x.is_contiguous()
+    assert 1 <= M <= 8, f"gemv serves M <= 8 (got {M})"
+    if out is None:
+        out = torch.empty(M, N, dtype=_ext.OUT_TORCH[out_dtype], device=x.device)
+    rc = L.tfp4_gemv(x.data_ptr(), M, K, _ext.IN_DTYPE[x.dtype],
+                     w.packed.data_ptr(), w.gemv_scales().data_ptr(), w.tensor_scale,
+                     out.data_ptr(), N, _ext.OUT_DTYPE[out_dtype], _ext.stream())
+    assert rc == 0, f"tfp4_gemv rc={rc}"
+    return out
+
+
 class NVFP4Tensor:
     """A row-major (R, K) tensor resident in NVFP4 (codes + block scales +
     per-tensor scale), in torch-owned buffers."""
@@ -131,6 +153,20 @@ class NVFP4Tensor:
     def __init__(self, packed: torch.Tensor, sblk: torch.Tensor, tensor_scale: float,
                  shape: tuple[int, int]):
         self.packed, self.sblk, self.tensor_scale, self.shape = packed, sblk, float(tensor_scale), shape
+        self._gemv_scales: torch.Tensor | None = None
+
+    def gemv_scales(self) -> torch.Tensor:
+        """The block scales un-scattered to plain (R, K/16) row-major bytes —
+        the GEMV path's weight-side scale layout (coalesced loads). Cached."""
+        if self._gemv_scales is None:
+            R, K = self.shape
+            from . import _ext
+            out = torch.empty(R, K // 16, dtype=torch.uint8, device=self.packed.device)
+            rc = _ext.core().tfp4_scales_gemv(
+                self.sblk.data_ptr(), R, K, out.data_ptr(), _ext.stream())
+            assert rc == 0, f"tfp4_scales_gemv rc={rc}"
+            self._gemv_scales = out
+        return self._gemv_scales
 
     @classmethod
     def from_float(cls, x: torch.Tensor, tensor_scale: float | None = None):

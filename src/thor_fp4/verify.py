@@ -72,12 +72,21 @@ class ReferenceLinear(nn.Module):
         xc = x.detach().contiguous()
         if xc.dtype not in (torch.float32, torch.float16, torch.bfloat16):
             xc = xc.float()
-        if getattr(layer, "engine_kind", "lt") == "mx8":
+        kind = getattr(layer, "engine_kind", "lt")
+        if kind == "mx8":
             # MX operands: the reference runs the torch fake-quant arithmetic
             # (e2m1/e4m3 codes with UE8M0 per-32 scales) and an FP32 matmul
             from .quant import mx_fake_quant
             xd = mx_fake_quant(xc.float(), "mxfp8")
             w = mx_fake_quant(layer.weight.detach().float(), "mxfp4")
+        elif kind == "gv":
+            # GEMV: activations are consumed exactly — only the weights are
+            # quantized, so the reference dequantizes weights and matmuls the
+            # raw activations
+            if layer._weight_fp4 is None:
+                layer.refresh_weight()
+            w = layer._weight_fp4.dequantize()                    # f32 (N, K)
+            xd = xc.float()
         else:
             if layer._weight_fp4 is None:
                 layer.refresh_weight()

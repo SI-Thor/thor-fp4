@@ -294,3 +294,51 @@ costs one extra dequantize + one FP32 matmul per layer (≈2× layer time, once)
 At serving time the cheaper invariant is the graph test: captured replay is
 bit-identical to eager (`test_cutlass_graph_capture`,
 `test_graph_replay_matches_eager`).
+
+## 8. Small-batch inference (DIRECTIONS.md §2): the register GEMV, measured
+
+1. **Hardware fact:** at batch M ≤ 8 a linear layer is bandwidth-bound —
+   the time is streaming the N·K weight bytes; NVFP4 weights are 3.56×
+   smaller than BF16. Two measured properties of this box bound any kernel
+   here: byte-granular global loads cap at **52 GB/s** while 16-B (uint4)
+   loads reach **215 GB/s** (same access pattern, only load width differs),
+   and DRAM/unordered contention holds both under the shared-seat load.
+2. **Why the naive path fails:** dequantizing FP4 weights into a BF16 copy
+   writes 2 B/element — more bytes than it saves (torchao's failure mode).
+3. **What was built:** `ops.gemv` / `Linear(engine="gemv")` — a warp-per-row
+   kernel that streams packed e2m1 codes with uint4 loads, decodes them in
+   registers through the hardware e2m1→f16x2 converter (1 instruction per
+   pair), scales by the block scales (un-scattered once per weight into a
+   plain row-major buffer — the tcgen05 tile layout scatters each row's
+   scales at 512-B stride and costs a 32-B sector per useful byte), stages
+   the ≤ 8×K activations in shared memory with an XOR swizzle
+   (word ^ word>>4) for conflict-free reuse across the block's rows, and
+   accumulates in FP32 with activations consumed exactly (never quantized).
+   It agrees with the dequantize-then-FP32-matmul reference to accumulation
+   order (relRMS ≈ 2e-7, unit tests).
+4. **Numbers** (`benchmarks/results/gemv.txt`, cold = 8 rotated weight
+   copies, load 7.7–9.0, 109–112 GB available):
+
+   | path | M=1 | M=8 | vs BF16 at N=K=8192 |
+   |---|---|---|---|
+   | BF16 mm (cuBLAS) | 1201 µs | 1432 µs | 1× |
+   | register GEMV | 1005 µs (42 GB/s) | 10475 µs | **1.2× / 0.14×** |
+   | **quantize + cuBLASLt NVFP4 GEMM** | **407 µs** | 522 µs | **2.95× / 2.74×** |
+
+   The register GEMV does **not** meet the ≥ 2.5× bar at any M: even at M=1,
+   where it is best, the scalar instruction stream (decode + scale + one FFMA
+   per weight element) cannot reach the uint4 streaming rate, and at M ≥ 2
+   the M·N·K scalar work overwhelms it (a tensor core does that product per
+   instruction; CUDA cores cannot). **The bar is met — by the tensor-core
+   path that already exists:** at M ≤ 8 with activation quantization
+   included, cuBLASLt's NVFP4 GEMM beats BF16 by **2.5–12×** on layers with
+   N ≥ 4096 (4096×8192: 55–88 µs vs 341–680 µs BF16; 381 GB/s effective on
+   weight bytes at M=1) and loses below N≈2048, exactly as the per-shape
+   table (§2) predicts. Small-M serving should therefore use the ordinary
+   `thor_fp4.Linear` path, not a custom GEMV.
+5. **What the GEMV is still for:** activations consumed *exactly* (no
+   quantization) makes it the most accurate FP4-weight execution in the
+   library — the right path when a small batch must be bit-faithful to the
+   FP4 weights (its quality is measured in §5 terms: zero activation-
+   quantization error), and the reference implementation for reasoning about
+   FP4 arithmetic. It ships documented at its measured rate.

@@ -207,6 +207,16 @@ const Variant kVariants[] = {
      &ensure<VT<Shape<_128, _128, _256>, Shape<_2, _1, _1>, MxF8, 32, MxF4, 128>>},
     {"mxfp8xfp4_128x256x256_c2x1",
      &ensure<VT<Shape<_128, _256, _256>, Shape<_2, _1, _1>, MxF8, 32, MxF4, 128>>},
+    // K-tile 128: halves the small-K fixed cost; K%128 still required.
+    // N-tile 256 swap: better N-tiling for very wide layers.
+    {"mxfp8xfp4_128x128x128_c1",
+     &ensure<VT<Shape<_128, _128, _128>, Shape<_1, _1, _1>, MxF8, 32, MxF4, 128>>},
+    {"mxfp8xfp4_128x128x128_c2x1",
+     &ensure<VT<Shape<_128, _128, _128>, Shape<_2, _1, _1>, MxF8, 32, MxF4, 128>>},
+    {"mxfp8xfp4_128x256x128_c2x1",
+     &ensure<VT<Shape<_128, _256, _128>, Shape<_2, _1, _1>, MxF8, 32, MxF4, 128>>},
+    {"mxfp8xfp4_256x128x256_c2x1",
+     &ensure<VT<Shape<_256, _128, _256>, Shape<_2, _1, _1>, MxF8, 32, MxF4, 128>>},
     {"mxfp4_128x128x256_c1",
      &ensure<VT<Shape<_128, _128, _256>, Shape<_1, _1, _1>, MxF4, 128, MxF4, 128>>},
     {"mxfp4_128x128x256_c2x1",

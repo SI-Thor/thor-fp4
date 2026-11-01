@@ -38,6 +38,7 @@
 //   tfp4_quant(x, R, K, in_dtype, ts, packed, sblk, stream)
 //   tfp4_quant_mx(x, R, K, in_dtype, kind, packed, sblk, stream)
 //   tfp4_gemm(pA, sA, tsA, pB, sB, tsB, out, M, N, K, out_dtype, stream)
+//   tfp4_gemv(x, M, K, in_dtype, pB, sB, tsB, out, N, out_dtype, stream)
 //   tfp4_dequant_f32(packed, sblk, ts, R, K, out, stream)
 //   tfp4_scales_f32(sblk, R, K, out, stream)
 //   tfp4_pad_rows(R)                       rows a buffer must be sized for
@@ -51,6 +52,7 @@
 #include <cuda_fp16.h>
 #include <cuda_bf16.h>
 #include <cuda_fp8.h>
+#include <cuda_fp4.h>
 
 #include <cstdio>
 #include <cstdlib>
@@ -334,6 +336,18 @@ __global__ void dequant_f32(const uint8_t* __restrict__ packed, const uint8_t* _
     }
 }
 
+// un-scatter the 128x4-tile scale layout into plain (R, S) row-major bytes —
+// the GEMV's weight-side scale layout (loaded coalesced, decoded on the fly)
+__global__ void scales_gemv_layout(const uint8_t* __restrict__ sblk,
+                                   int64_t R, int64_t S, uint8_t* __restrict__ out) {
+    int64_t total = R * S;
+    for (int64_t i = (int64_t)blockIdx.x * blockDim.x + threadIdx.x; i < total;
+         i += (int64_t)gridDim.x * blockDim.x) {
+        int64_t r = i / S, s = i % S;
+        out[i] = sblk[sf_index(r, s, S)];
+    }
+}
+
 __global__ void scales_f32(const uint8_t* __restrict__ sblk, int64_t R, int64_t K,
                            float* __restrict__ out) {
     int64_t S = K / 16;
@@ -361,6 +375,144 @@ int ensure_sflat(size_t elems) {
     CK(cudaMalloc(&g_sflat, elems * 4));
     g_sflat_elems = elems;
     return 0;
+}
+
+// ---------------------------------------------------------------------------
+// NVFP4-weight GEMV (DIRECTIONS.md §2): y = x @ dequant(W)^T for small M.
+//
+// At small M the layer is bandwidth-bound: the time is streaming the N*K
+// weight bytes, and NVFP4 weights are 3.56x smaller than BF16. What it takes
+// to actually run at the weight-stream rate on this box (each measured):
+//   * 16-B (uint4) weight loads — byte-granular loads cap at ~52 GB/s here
+//     vs 215 GB/s for uint4, regardless of coalescing;
+//   * the block-scale bytes un-scattered to a plain (N, K/16) row-major
+//     buffer (tfp4_scales_gemv, once per weight): the tcgen05 128x4 tile
+//     layout scatters each row's scales with stride 512 B, and reading it
+//     directly costs a 32-B sector per useful byte;
+//   * each block stages the (M x chunk) activations in shared memory once
+//     and reuses them across its 16*RPW output rows, with an XOR swizzle
+//     (word ^ word>>4) so every warp's float2 reads are bank-conflict-free;
+//   * the e2m1 codes decode through the hardware e2m1->f16x2 converter (one
+//     instruction per pair) and are scaled by the UE4M3 block scale —
+//     dequantization in registers, no BF16 copy of the weights is written.
+// Accumulation is FP32; the dequantization arithmetic is identical to
+// tfp4_dequant_f32 (only the summation order differs). Activations are
+// consumed exactly (f32/f16/bf16, converted to f32 once when staged).
+// ---------------------------------------------------------------------------
+__device__ __forceinline__ float2 e2m1x2_dec(unsigned char b) {
+    __half2_raw hr = __nv_cvt_fp4x2_to_halfraw2((__nv_fp4x2_storage_t)b, __NV_E2M1);
+    __half2 h = *reinterpret_cast<__half2*>(&hr);
+    return __half22float2(h);
+}
+
+// MT = activation rows (1..8), RPW = output rows per warp (1..8,
+// RPW*MT<=32): a block of 512 threads covers R = 16*RPW output rows.
+template <typename XT, int MT, int RPW>
+__global__ void __launch_bounds__(512)
+gemv_nvfp4(const XT* __restrict__ x, int M,
+           const uint8_t* __restrict__ pB, const uint8_t* __restrict__ sgemv,
+           float ts, int64_t N, int64_t K, void* __restrict__ out, int out_dtype,
+           int64_t chunk) {
+    extern __shared__ float2 xs[];               // MT rows of chunk float2
+    int64_t S = K / 16;
+    int warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
+    int64_t n0 = ((int64_t)blockIdx.x * 16 + warp) * RPW;   // warp's first row
+    float acc[RPW][MT];
+#pragma unroll
+    for (int rr = 0; rr < RPW; ++rr)
+#pragma unroll
+        for (int m = 0; m < MT; ++m) acc[rr][m] = 0.f;
+    for (int64_t c0 = 0; c0 < K; c0 += chunk) {
+        int64_t ce = min(chunk, K - c0);
+        // stage x[c0:c0+ce) rows 0..M as float2, swizzled: pair word
+        // pw -> pw ^ (pw >> 4)  (conflict-free for this kernel's access)
+        for (int64_t i = threadIdx.x; i < (int64_t)M * (ce / 2); i += 512) {
+            int m = (int)(i / (ce / 2));
+            int64_t pw = i % (ce / 2);
+            float2 v;
+            if constexpr (sizeof(XT) == 4) {
+                v = *(const float2*)(x + (int64_t)m * K + c0 + 2 * pw);
+            } else {
+                if constexpr (std::is_same_v<XT, __half>) {
+                    __half2 h = *(const __half2*)(x + (int64_t)m * K + c0 + 2 * pw);
+                    v = __half22float2(h);
+                } else {
+                    __nv_bfloat162 b = *(const __nv_bfloat162*)(x + (int64_t)m * K + c0 + 2 * pw);
+                    v = __bfloat1622float2(b);
+                }
+            }
+            int64_t phys = pw ^ (pw >> 4);
+            xs[(int64_t)m * (chunk / 2) + phys] = v;
+        }
+        __syncthreads();
+        const uint4* wvec[RPW];
+#pragma unroll
+        for (int rr = 0; rr < RPW; ++rr)
+            wvec[rr] = (const uint4*)(pB + (n0 + rr) * (K / 2));
+        int64_t nvec = ce / 32;                    // uint4s per row per chunk
+        for (int64_t v = lane; v < nvec; v += 32) {
+            uint4 w[RPW];
+#pragma unroll
+            for (int rr = 0; rr < RPW; ++rr)
+                w[rr] = wvec[rr][(c0 / 32) + v];
+            // scale groups of this uint4: 2v and 2v+1 (chunk-global)
+            int64_t g0 = c0 / 16 + 2 * v;
+            float s[RPW][2];
+#pragma unroll
+            for (int rr = 0; rr < RPW; ++rr) {
+                int64_t n = n0 + rr;
+                if (n < N) {
+                    s[rr][0] = e4m3_dec(sgemv[n * S + g0]) * ts;
+                    s[rr][1] = e4m3_dec(sgemv[n * S + g0 + 1]) * ts;
+                }
+            }
+            const unsigned char* wb[RPW];
+#pragma unroll
+            for (int rr = 0; rr < RPW; ++rr)
+                wb[rr] = (const unsigned char*)&w[rr];
+#pragma unroll
+            for (int m = 0; m < MT; ++m) {
+                if (m >= M) break;
+#pragma unroll
+                for (int j = 0; j < 16; ++j) {
+                    int64_t pw = 16 * v + j;
+                    float2 xv = xs[(int64_t)m * (chunk / 2) + (pw ^ (pw >> 4))];
+                    float xa = xv.x, xb = xv.y;
+#pragma unroll
+                    for (int rr = 0; rr < RPW; ++rr) {
+                        int64_t n = n0 + rr;
+                        if (n >= N) continue;
+                        float2 w2 = e2m1x2_dec(wb[rr][j]);
+                        float s0 = (j < 8) ? s[rr][0] : s[rr][1];
+                        acc[rr][m] = fmaf(w2.x * s0, xa, acc[rr][m]);
+                        acc[rr][m] = fmaf(w2.y * s0, xb, acc[rr][m]);
+                    }
+                }
+            }
+        }
+        __syncthreads();
+    }
+#pragma unroll
+    for (int rr = 0; rr < RPW; ++rr) {
+        int64_t n = n0 + rr;
+        if (n >= N) continue;
+#pragma unroll
+        for (int m = 0; m < MT; ++m) {
+            if (m >= M) break;
+#pragma unroll
+            for (int off = 16; off; off >>= 1)
+                acc[rr][m] += __shfl_xor_sync(0xffffffffu, acc[rr][m], off);
+        }
+        if (lane == 0) {
+#pragma unroll
+            for (int m = 0; m < MT; ++m) {
+                if (m >= M) break;
+                if (out_dtype == 0) ((__half*)out)[(int64_t)m * N + n] = __float2half(acc[rr][m]);
+                else if (out_dtype == 1) ((__nv_bfloat16*)out)[(int64_t)m * N + n] = __float2bfloat16(acc[rr][m]);
+                else ((float*)out)[(int64_t)m * N + n] = acc[rr][m];
+            }
+        }
+    }
 }
 
 }  // namespace
@@ -546,6 +698,68 @@ int tfp4_scales_f32(const uint8_t* sblk, int64_t R, int64_t K, float* out,
     int64_t S = K / 16;
     int64_t total = R * S;
     scales_f32<<<(unsigned)((total + 255) / 256), 256, 0, stream>>>(sblk, R, K, out);
+    CK(cudaGetLastError());
+    return 0;
+}
+
+// un-scatter blocked UE4M3 scales (128x4-tile layout) into plain (R, K/16)
+// row-major bytes for the GEMV path; call once per weight
+int tfp4_scales_gemv(const uint8_t* sblk, int64_t R, int64_t K,
+                     uint8_t* out, cudaStream_t stream) {
+    int64_t S = K / 16;
+    int64_t total = R * S;
+    scales_gemv_layout<<<(unsigned)((total + 255) / 256), 256, 0, stream>>>(
+        sblk, R, S, out);
+    CK(cudaGetLastError());
+    return 0;
+}
+
+// NVFP4-weight GEMV: out (M,N) = x (M,K) @ dequant(W)^T, weights the same
+// NVFP4 buffers the GEMM path uses (packed + blocked scales + tensor scale),
+// activations read exactly (no quantization). M <= 8. out_dtype 0=f16 1=bf16
+// 2=f32. FP32 accumulation; weights dequantize in registers.
+int tfp4_gemv(const void* x, int64_t M, int64_t K, int in_dtype,
+              const uint8_t* packedB, const uint8_t* sgemvB, float tsB,
+              void* out, int64_t N, int out_dtype, cudaStream_t stream) {
+    if (M < 1 || M > 8) { fprintf(stderr, "thor_fp4 gemv: M must be 1..8 (got %ld)\n", (long)M); return -6; }
+    if ((K % 64) != 0) { fprintf(stderr, "thor_fp4 gemv: K must be a multiple of 64 (got %ld)\n", (long)K); return -3; }
+    // rows per warp: more rows per block = more x reuse in shared memory;
+    // capped so RPW*MT accumulators fit registers. Target >= 20 blocks.
+    int MT = M <= 1 ? 1 : (M <= 2 ? 2 : (M <= 4 ? 4 : 8));
+    int RPW = 1;
+    while (RPW < 8 && RPW * MT <= 16 && (N + (2 * RPW * 16) - 1) / (2 * RPW * 16) < 20)
+        RPW *= 2;                                    // double block span until >=20 blocks
+    while (RPW > 1 && RPW * MT > 32) RPW /= 2;
+    int64_t R = 16ll * RPW;
+    unsigned grid = (unsigned)((N + R - 1) / R);
+    int64_t chunk = 40960 / 4 / MT;                  // x staging budget 40 KB
+    chunk = chunk / 256 * 256;
+    if (chunk < 256) chunk = 256;
+    if (chunk > K) chunk = K;
+    size_t shm = (size_t)MT * (size_t)(chunk / 2) * sizeof(float2);
+    #define GO(XT, MTv, RPWv) gemv_nvfp4<XT, MTv, RPWv><<<grid, 512, shm, stream>>>( \
+        (const XT*)x, (int)M, packedB, sgemvB, tsB, N, K, out, out_dtype, chunk)
+    #define GO_M(XT)                                                            \
+        do {                                                                    \
+            if (MT == 1) {                                                      \
+                if (RPW == 1) GO(XT, 1, 1); else if (RPW == 2) GO(XT, 1, 2);    \
+                else if (RPW == 4) GO(XT, 1, 4); else GO(XT, 1, 8);             \
+            } else if (MT == 2) {                                               \
+                if (RPW == 1) GO(XT, 2, 1); else if (RPW == 2) GO(XT, 2, 2);    \
+                else if (RPW == 4) GO(XT, 2, 4); else GO(XT, 2, 8);             \
+            } else if (MT == 4) {                                               \
+                if (RPW == 1) GO(XT, 4, 1); else if (RPW == 2) GO(XT, 4, 2);    \
+                else if (RPW == 4) GO(XT, 4, 4); else GO(XT, 4, 8);             \
+            } else {                                                            \
+                if (RPW == 1) GO(XT, 8, 1); else if (RPW == 2) GO(XT, 8, 2);    \
+                else GO(XT, 8, 4);                                              \
+            }                                                                   \
+        } while (0)
+    if (in_dtype == 0) GO_M(float);
+    else if (in_dtype == 1) GO_M(__half);
+    else GO_M(__nv_bfloat16);
+    #undef GO_M
+    #undef GO
     CK(cudaGetLastError());
     return 0;
 }

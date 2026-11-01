@@ -55,6 +55,11 @@ def _decl_core(L):
     L.tfp4_gemm.argtypes = [c_void, c_void, ctypes.c_float, c_void, c_void, ctypes.c_float,
                             c_void, i64, i64, i64, ctypes.c_int, c_void]
     L.tfp4_gemm.restype = ctypes.c_int
+    L.tfp4_gemv.argtypes = [c_void, i64, i64, ctypes.c_int, c_void, c_void, ctypes.c_float,
+                            c_void, i64, ctypes.c_int, c_void]
+    L.tfp4_gemv.restype = ctypes.c_int
+    L.tfp4_scales_gemv.argtypes = [c_void, i64, i64, c_void, c_void]
+    L.tfp4_scales_gemv.restype = ctypes.c_int
     L.tfp4_dequant_f32.argtypes = [c_void, c_void, ctypes.c_float, i64, i64, c_void, c_void]
     L.tfp4_dequant_f32.restype = ctypes.c_int
     L.tfp4_scales_f32.argtypes = [c_void, i64, i64, c_void, c_void]
@@ -71,8 +76,24 @@ def _decl_cutlass(L):
     L.tfc4_variant_name.restype = ctypes.c_char_p
 
 
+def _decl_fused(L):
+    L.tfc4f_gemm.argtypes = [ctypes.c_int, c_void, c_void, c_void, c_void, c_void,
+                             c_void, c_void, c_void, i64, i64, i64,
+                             ctypes.c_float, c_void]
+    L.tfc4f_gemm.restype = ctypes.c_int
+    L.tfc4f_n_variants.argtypes = []
+    L.tfc4f_n_variants.restype = ctypes.c_int
+    L.tfc4f_variant_name.argtypes = [ctypes.c_int]
+    L.tfc4f_variant_name.restype = ctypes.c_char_p
+    L.tfc4f_variant_index.argtypes = [ctypes.c_char_p]
+    L.tfc4f_variant_index.restype = ctypes.c_int
+    L.tfc4f_sfd_bytes.argtypes = [i64, i64]
+    L.tfc4f_sfd_bytes.restype = i64
+
+
 _core = None
 _cutlass = None
+_fused = None
 _ws_bytes = 32 << 20
 
 
@@ -95,6 +116,19 @@ def cutlass():
         _cutlass = ctypes.CDLL(str(path))
         _decl_cutlass(_cutlass)
     return _cutlass
+
+
+def fused():
+    """The optional fused-epilogue library (MXFP8-out chain kernels, sm_110a).
+    None if absent (`make fused`)."""
+    global _fused
+    if _fused is None:
+        path = _BUILD / "libthorfp4_fused.so"
+        if not path.exists():
+            return None
+        _fused = ctypes.CDLL(str(path))
+        _decl_fused(_fused)
+    return _fused
 
 
 def cublaslt_version() -> int:

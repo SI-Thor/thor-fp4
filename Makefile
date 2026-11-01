@@ -5,6 +5,8 @@
 #   make core          build build/libthorfp4_core.so   (cuBLASLt path; ~40 s)
 #   make cutlass       build build/libthorfp4_cutlass.so (own sm_110a kernels; ~5-15 min,
 #                      4-8 GB RAM -> run under `flock ~/lm-wt/heavy.lock` on a shared box)
+#   make fused         build build/libthorfp4_fused.so (fused-epilogue chain kernels;
+#                      same toolchain and cost as `cutlass`)
 #   make bench-cutlass standalone CUTLASS benchmark binaries (same kernels, self-timing)
 #   make test          run the unit tests
 #
@@ -42,6 +44,14 @@ build/libthorfp4_cutlass.so: csrc/cutlass_kernels.cu | build
 	    -o $@ $< -lcublasLt
 
 cutlass: build/libthorfp4_cutlass.so
+
+build/libthorfp4_fused.so: csrc/fused_kernels.cu | build
+	@test -n "$(CUTLASS_DIRS)" || { echo "CUTLASS not found: set CUTLASS_ROOT or run scripts/fetch-cutlass.sh"; exit 1; }
+	$(NVCC) $(ARCHA) $(COMMON) --expt-relaxed-constexpr \
+	    -I$(CUTLASS_DIRS)/include -I$(CUTLASS_DIRS)/tools/util/include \
+	    -o $@ $< -lcublasLt
+
+fused: build/libthorfp4_fused.so
 
 build/bench_cutlass: csrc/bench_main.cu build/libthorfp4_cutlass.so
 	$(NVCC) $(ARCHA) -O2 -std=c++17 -Xlinker -rpath=\$$ORIGIN \
