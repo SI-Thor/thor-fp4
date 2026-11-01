@@ -1,0 +1,41 @@
+# mxfp8xfp4 ROUND-2 tuning sweep (also in BENCHMARKS.md sec.3)
+== mxfp8xfp4 tuning sweep (ROUND 2)  load=8.86 mem_avail=106GiB ==
+-- mxfp8xfp4_128x128x256_c1 @ 8192^3
+# variant                        relRMS          ms    TFLOPS   status
+# mxfp8xfp4_128x128x256_c1     1.67e-03      10.087     109.0       OK
+-- mxfp8xfp4_128x128x256_c2x1 @ 8192^3
+# variant                        relRMS          ms    TFLOPS   status
+# mxfp8xfp4_128x128x256_c2x1   1.67e-03      19.246      57.1       OK
+-- mxfp8xfp4_128x256x256_c2x1 @ 8192^3
+# variant                        relRMS          ms    TFLOPS   status
+# mxfp8xfp4_128x256x256_c2x1   1.67e-03      20.017      54.9       OK
+-- mxfp8xfp4_128x128x128_c1 @ 8192^3
+# variant                        relRMS          ms    TFLOPS   status
+# mxfp8xfp4_128x128x128_c1     1.67e-03      10.236     107.4       OK
+-- mxfp8xfp4_128x128x128_c2x1 @ 8192^3
+# variant                        relRMS          ms    TFLOPS   status
+# mxfp8xfp4_128x128x128_c2x1   1.67e-03      19.837      55.4       OK
+-- mxfp8xfp4_128x256x128_c2x1 @ 8192^3
+# variant                        relRMS          ms    TFLOPS   status
+# mxfp8xfp4_128x256x128_c2x1   1.67e-03       6.085     180.7       OK
+-- mxfp8xfp4_256x128x256_c2x1 @ 8192^3
+# variant                        relRMS          ms    TFLOPS   status
+# mxfp8xfp4_256x128x256_c2x1   1.67e-03      20.011      54.9       OK
+
+== scorer/decision shapes (M=4096) ==
+-- N=1024 K=1024
+# mxfp8xfp4_128x256x256_c2x1   1.58e-03       0.145      59.3       OK
+# mxfp8xfp4_128x128x256_c2x1   1.58e-03       0.041     208.1       OK
+# mxfp8xfp4_128x128x128_c2x1   1.58e-03       0.034     251.8       OK
+-- N=1024 K=512
+# mxfp8xfp4_128x256x256_c2x1   1.69e-03       0.065      65.7       OK
+# mxfp8xfp4_128x128x256_c2x1   1.69e-03       0.031     137.0       OK
+# mxfp8xfp4_128x128x128_c2x1   1.69e-03       0.029     149.5       OK
+-- N=5120 K=1280
+# mxfp8xfp4_128x256x256_c2x1   1.64e-03       0.853      62.9       OK
+# mxfp8xfp4_128x128x256_c2x1   1.64e-03       0.301     178.2       OK
+# mxfp8xfp4_128x128x128_c2x1   1.64e-03       0.301     178.3       OK
+-- N=1280 K=5120
+# mxfp8xfp4_128x256x256_c2x1   1.72e-03       0.998      53.8       OK
+# mxfp8xfp4_128x128x256_c2x1   1.72e-03       0.300     178.9       OK
+# mxfp8xfp4_128x128x128_c2x1   1.72e-03       0.263     204.1       OK

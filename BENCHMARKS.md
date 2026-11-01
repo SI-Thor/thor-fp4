@@ -109,8 +109,19 @@ quantize pass itself, i.e. activation bandwidth, not kernel quality.
 |---|---|---|---|
 | nvfp4 128×128×256 c1 (the lab's config) | 1.60e-3 | 10.85 | 101 |
 | nvfp4 128×256×256 c(2,1,1) — best | 1.60e-3 | **5.67** | **194** |
-| mxfp8×mxfp4 128×128×256 c1 | 1.67e-3 | 9.88 | 111 |
+| mxfp8×mxfp4 128×128×256 c1 (round-2 default) | 1.67e-3 | 10.09 | 109 |
+| **mxfp8×mxfp4 128×256×128 c(2,1,1) — ROUND-2 best** | 1.67e-3 | **5.8–6.5** | **169–190** |
 | mxfp4×mxfp4 128×128×256 c1 | **1.00 (wrong values)** | 10.3 | — |
+
+   - **ROUND-2 tuning (mxfp8×mxfp4)**: a 128-deep K-tile with a wide
+     256-wide N-tile is the win for the mixed path — 169–190 TFLOPS at
+     8192³ (1.6× the round-1 default; interleaved re-runs under load 8.9,
+     `mem_avail` 106 GB; all relRMS 1.67e-3 unchanged). At decision-model
+     shapes (M=4096) the K-tile-128 128×128×128 c(2,1,1) variant reaches
+     **150–252 TFLOPS** (N×K = 1024×1024: 0.034 ms, 252; 1024×512: 150;
+     5120×1280: 178; 1280×5120: 204) — the K-tile-256 kernels measured
+     90–173 there in round 1. `resolve_mx8_variant(K)` picks by shape;
+     `convert(policy="mx8")` uses it.
 
    - **cuBLASLt vs CUTLASS, identical packed inputs** (2048³, via the
      library): relRMS 1.7e-3 — the two independent implementations agree to
@@ -192,6 +203,20 @@ FP4 models per GB.
 | PTQ fake MX, FP4 acts | 0.0305 | 52.8 % | 0.2991 | 70.2 % |
 | PTQ fake MX, **FP8 acts** | 0.0279 | 56.1 % | 0.2693 | 75.3 % |
 | **PTQ real MXFP8 acts × FP4 weights (CUTLASS)** | 0.0280 | 56.1 % | 0.2699 | **75.4 %** |
+
+ROUND 2 rows (same task, `quality.txt`, load 14.1–14.7, real paths):
+
+| variant | Q-MSE vs teacher | top-1 vs teacher | top-1 keeps own BF16's choice |
+|---|---|---|---|
+| tuned mx8 engine (128×128×128 c2x1) — same arithmetic, new speed | 0.0280 | 56.1 % | 75.4 % |
+| **FP4 weights via GEMV, activations consumed exactly (M ≤ 8)** | **0.0191** | **59.3 %** | **85.0 %** |
+
+The GEMV row is the quality payoff of §8's engine: with only the weights
+quantized (no activation quantization at all), FP4-weight serving keeps
+85 % of BF16 choices — the best FP4-weight quality measured, within 2.8
+points of BF16's own 61.1 % teacher agreement — at the 3.56× weight
+density. It is the natural engine for small-batch decision serving where
+quality matters more than the (already large) small-M speedups of §8.
 
 Readings, including where they differ from the lab's run:
 - **Serving matches training arithmetic exactly** (real rows = fake rows):

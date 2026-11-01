@@ -96,3 +96,35 @@ except Exception as e:
     print(f"# (mixed real path unavailable: {type(e).__name__}: {e})")
 
 print(f"\n# done  {boxstate()}")
+
+# ---- ROUND 2 additions ----
+print(f"\n== ROUND 2: tuned mx8 engine, GEMV activations (exact), fused chain  {boxstate()} ==")
+with torch.no_grad():
+    try:
+        y = fp4_forward(bf, x, engine="cutlass:mx8")
+        report("PTQ real mx8a x fp4w (tuned)", y)
+    except Exception as e:
+        print(f"# (tuned mx8 unavailable: {type(e).__name__}: {e})")
+    # the GEMV path consumes activations EXACTLY (only weights quantized):
+    # its quality is the upper bound for any FP4-weight path. Runs in chunks
+    # of 8 (the engine's batch limit).
+    try:
+        outs = []
+        for i in range(0, len(x), 8):
+            outs.append(fp4_forward(bf, x[i:i+8], engine="gemv"))
+        report("PTQ real fp4w, GEMV (exact acts)", torch.cat(outs))
+    except Exception as e:
+        print(f"# (gemv quality unavailable: {type(e).__name__}: {e})")
+    # the fused chain (one kernel per layer) if the fused lib is built
+    try:
+        chain = thor_fp4.mx8_chain(*DIMS).cuda()
+        lins = [mod for mod in bf if isinstance(mod, torch.nn.Linear)]
+        fl = [m for m in chain if isinstance(m, thor_fp4.FusedLinear)]
+        flin = [m for m in chain if isinstance(m, thor_fp4.Linear)]
+        with torch.no_grad():
+            for f, l in zip(fl + flin, lins):
+                f.weight.copy_(l.weight); f.bias.copy_(l.bias)
+        report("PTQ real fused mx8 chain", chain(x).float())
+    except Exception as e:
+        print(f"# (fused chain unavailable: {type(e).__name__}: {e})")
+print(f"\n# done  {boxstate()}")

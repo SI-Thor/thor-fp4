@@ -128,9 +128,23 @@ rows = thor_fp4.cascade_sweep(model_fp4, model_bf16, x)   # threshold curve
 # 6b. or escalate by arithmetic, not confidence (DIRECTIONS.md §1): the
 # final layer's weight-error certificate; uncertified samples get promoted
 logits, certified = thor_fp4.certified_forward(model4, x)
+# 6c. carrying the interval through the activations (ROUND 2) — measured to
+# certify 0% on real margins; kept as the negative-result artifact
+ok, bound, logits = thor_fp4.IntervalChainCertificate(model4).check(x)
 
 # 7. our own kernels (make cutlass): engine="cutlass" or a variant name
 lin = thor_fp4.Linear(8192, 8192, engine="cutlass:mxfp8xfp4_128x128x256_c1").cuda()
+
+# 8. decision models where quality matters: FP4 weights x FP8 activations
+model_q = thor_fp4.convert(model, policy="mx8")     # falls back per-shape
+
+# 9. the register-dequant GEMV (small M, activations consumed exactly)
+lin = thor_fp4.Linear(4096, 8192, engine="gemv").cuda()
+y = lin(torch.randn(8, 4096, device="cuda"))        # M <= 8
+
+# 10. fused chains (make fused): one kernel per layer — GEMM + bias + GELU +
+# MXFP8 quantize in the epilogue, no separate quantize pass anywhere
+chain = thor_fp4.mx8_chain(512, 1024, 1024, 64).cuda()
 ```
 
 ## Shape-aware conversion: why "auto" is not "fp4 everywhere"
