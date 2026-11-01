@@ -1,0 +1,9 @@
+# thor-fp4 bench_certify  cublasLt=130401  load=11.30 mem_avail=106GiB
+certified share:                  0.21%   (35/16384)
+certificate sound (vs true-weights-on-same-acts): 100.0%  (must be 100)
+fp4 agreement with bf16:          77.9%
+after final-layer promotion:      80.2%  (final-layer exactness alone recovers 2.3 pts)
+promote ALL (upper bound):        80.2%
+# (gap closed by final-layer exactness: 2.3 pts of 22.1 — the rest is upstream activation error)
+# median logit bound 0.667 vs median margin 0.103 — the triangle-inequality bound is ~sqrt(K)x the typical random-sign error, so coverage is thin at K=1024
+# load=11.30 mem_avail=106GiB

@@ -21,7 +21,7 @@ Measured numbers, with the box state beside them, live in
 git clone <this repo> && cd thor-fp4
 make venv          # local .venv: torch, numpy, pytest (from the wheel cache)
 make core          # build/libthorfp4_core.so — the cuBLASLt path (~40 s)
-make test          # 60 tests: bit-exactness, tolerances, verify, capture
+make test          # 63 tests: bit-exactness, tolerances, verify, capture
 
 .venv/bin/python - <<'EOF'
 import torch, thor_fp4
@@ -80,10 +80,11 @@ locally (`.venv`, `build/`); nothing is installed system-wide.
      activation buffers) is resolved on first use and reused — repeated
      calls, and whole FP4 chains, capture into CUDA graphs.
 
-4. **Measured numbers.** [BENCHMARKS.md](BENCHMARKS.md) — bare GEMMs at
-   371–456 TFLOPS class (library path 405 TFLOPS at 2048³, 2.9× the same
-   box's BF16), per-shape end-to-end costs, quality tables, and the cascade
-   measurement, each with load/memory beside it.
+4. **Measured numbers.** [BENCHMARKS.md](BENCHMARKS.md) — the library path
+   at 405 TFLOPS bare (2048³; the lab's locked sweep measured the same
+   shapes at 2.5–4.3× BF16 and ~half FP8's joules), per-shape end-to-end
+   costs, quality tables, and the cascade measurement, each with the box
+   state beside it.
 
 5. **What it makes possible.** 3.55× smaller resident weights than BF16
    (0.5625 B/parameter) at 2–3× the BF16 GEMM rate on large-K layers — so
@@ -123,6 +124,10 @@ qat_model = thor_fp4.QATSequential(layer1, act, layer2, ...)
 cas = thor_fp4.Cascade(model_fp4, model_bf16, threshold=0.35)
 logits, escalated, confidence = cas(x)
 rows = thor_fp4.cascade_sweep(model_fp4, model_bf16, x)   # threshold curve
+
+# 6b. or escalate by arithmetic, not confidence (DIRECTIONS.md §1): the
+# final layer's weight-error certificate; uncertified samples get promoted
+logits, certified = thor_fp4.certified_forward(model4, x)
 
 # 7. our own kernels (make cutlass): engine="cutlass" or a variant name
 lin = thor_fp4.Linear(8192, 8192, engine="cutlass:mxfp8xfp4_128x128x256_c1").cuda()
@@ -207,7 +212,7 @@ csrc/cutlass_kernels.cu    our sm_110a GEMM variants (C ABI tfc4_*)
 csrc/bench_main.cu         standalone validation+timing for those variants
 src/thor_fp4/              the Python package (linear, quant, convert, verify,
                            graphs, cascade, ops, _ext)
-tests/                     60 tests: bit-exactness, tolerances, pitfalls,
+tests/                     63 tests: bit-exactness, tolerances, pitfalls,
                            verify injection, convert policies, QAT, capture
 benchmarks/                bench_gemm / quality / batch / cascade drivers +
                            bench_cutlass_suite.sh; results in benchmarks/results

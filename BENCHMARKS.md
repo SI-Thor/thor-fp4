@@ -152,16 +152,16 @@ quantize pass itself, i.e. activation bandwidth, not kernel quality.
 
 | B | BF16 eager | BF16 graph | FP4 eager | FP4 graph | best dec/s |
 |---|---|---|---|---|---|
-| 1 | 143.7 µs | **29.9 µs** | 284.3 µs | 45.2 µs | 33 k |
-| 8 | 151.2 µs | **16.8 µs** | 359.9 µs | 47.5 µs | 475 k |
-| 64 | 93.5 µs | **24.6 µs** | 408.7 µs | 55.6 µs | 2.6 M |
-| 256 | 106.1 µs | **31.4 µs** | 374.8 µs | 160.3 µs | 8.1 M |
+| 1 | 62.4 µs | **17.4 µs** | 176.0 µs | 39.1 µs | 58 k |
+| 8 | 122.8 µs | **22.3 µs** | 218.8 µs | 43.7 µs | 359 k |
+| 64 | 144.8 µs | **30.5 µs** | 312.1 µs | 49.7 µs | 2.1 M |
+| 256 | 153.0 µs | **32.7 µs** | 335.1 µs | 69.0 µs | 7.8 M |
 
-   BF16 + graph stays 1.5–5× faster than FP4 + graph at this model scale:
-   these GEMMs (K = 512/1024) sit below the FP4 crossover, exactly as the
-   per-shape table predicts. FP4's win here is **memory**: 0.93 MB vs
-   3.3 MB resident weights (3.55×) — a decision-model bank holds 3.5× more
-   FP4 models per GB.
+BF16 + graph stays 1.8–4.5× faster than FP4 + graph at this model scale:
+these GEMMs (K = 512/1024) sit below the FP4 crossover, exactly as the
+per-shape table predicts. FP4's win here is **memory**: 0.92 MB vs
+3.3 MB resident weights (3.56×) — a decision-model bank holds 3.5× more
+FP4 models per GB.
 5. **What it makes possible:** latency-critical small decisons should stay
    BF16+graph; FP4 pays when the same bank must hold many more models than
    memory allows in BF16, or when layers are big-K.
@@ -246,8 +246,10 @@ what the escalation rates say: on this task the FP4 model is unsure on most
 samples (random-teacher logits are flat), so recovering the gap costs
 re-running 60–90 % of them in BF16.
 
-Cost at batch 256, real paths (load 9.3): BF16 57.3 µs, FP4 173.4 µs,
-cascade at the 96 %-recovery threshold ≈ FP4 + escalated subset. At
+Cost at batch 256, real paths measured together (load 9.3): BF16 eager
+57.3 µs, FP4 eager 173.4 µs, the eager cascade 428.9 µs including its
+stats sync (the loop is FP4 + the escalated subset through BF16, plus a
+per-call `.item()` that a production loop would keep on-device). At
 decision-MLP scale FP4 is slower than BF16 (§4), so the loop is
 latency-negative there — its value is when the FP4 model is what fits
 (resident bytes 0.92 MB vs 3.28 MB, 3.56×) or at big-K scale where FP4 is
@@ -256,6 +258,34 @@ also the faster path.
    resident for the bulk, BF16 (or a bigger model) loaded/re-run only for
    the unsure fraction, with the threshold chosen from a measured
    recovery-vs-cost curve (`thor_fp4.cascade_sweep`).
+
+### 6a. The arithmetic certificate (`thor_fp4.certify`), measured
+
+DIRECTIONS.md §1 proposes making the escalation decision by arithmetic: the
+final layer's weight-error bound `Σ|x̂|·|W−Ŵ|` (exact per-weight errors from
+the fp32 master weights, applied to the dequantized activations the hardware
+consumed) versus the FP4 top-1 margin. Measured on the same scorer
+(`benchmarks/results/certify.txt`, load 9.1–11.9):
+
+- **The certificate is sound**: across all runs, 0 certified samples
+  disagreed with the true-weights-on-same-activations argmax (unit-tested at
+  scale, including two soundness bugs the tests caught during development:
+  the bound must be weighted by the *dequantized* activations, and top-1
+  must beat the *largest* bound over all other logits, not just top-2's).
+- **Coverage is thin at these margins: 0.29 %** of samples certify. The
+  triangle-inequality bound (0.63 median) sits ~√K above the typical
+  random-sign error, while median margins are 0.10. Certificates of this
+  form need models trained for margin (or shorter K) to cover widely.
+- **Final-layer exactness is not where the disagreement lives**: promoting
+  *every* sample through the true final-layer weights (fp32) moves agreement
+  with BF16 from 77.9 % to only 80.2 % — i.e. **~90 % of the FP4-vs-BF16
+  disagreement is upstream activation-quantization error**, not final-layer
+  weight error. This is why the learned-confidence gate (which reacts to the
+  actual logit uncertainty, upstream included) recovers 96 % of the gap
+  while the final-layer arithmetic gate cannot, and it redirects the
+  certificate idea: to certify decisions, the bound must be carried through
+  the activations (interval arithmetic through the net), or the activation
+  quantization itself must be reduced (the FP8-activation mix in §5).
 
 ## 7. Verification cost
 

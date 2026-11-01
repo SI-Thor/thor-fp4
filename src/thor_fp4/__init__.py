@@ -22,6 +22,7 @@ from .convert import auto_decision, calibrate, convert, load_shape_table
 from .verify import ReferenceLinear, VerifyReport, verify, verify_linear
 from .graphs import Graphed, capture_module
 from .cascade import Cascade, cascade_sweep, confidence_margin, confidence_softmax
+from .certify import FinalLayerCertificate, certified_forward
 
 __all__ = [
     "Linear", "NVFP4Tensor", "MXTensor", "ops",
@@ -32,5 +33,6 @@ __all__ = [
     "verify", "verify_linear", "VerifyReport", "ReferenceLinear",
     "Graphed", "capture_module",
     "Cascade", "cascade_sweep", "confidence_margin", "confidence_softmax",
+    "FinalLayerCertificate", "certified_forward",
     "cublaslt_version", "__version__",
 ]
