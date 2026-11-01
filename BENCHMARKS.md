@@ -401,3 +401,46 @@ bit-identical to eager (`test_cutlass_graph_capture`,
    FP4 weights (its quality is measured in §5 terms: zero activation-
    quantization error), and the reference implementation for reasoning about
    FP4 arithmetic. It ships documented at its measured rate.
+
+## 9. Retrieval as a large-K FP4 GEMM (DIRECTIONS.md §3), measured
+
+1. **Hardware fact:** a retrieval tick is queries × libraryᵀ with K = the
+   embedding dimension; at 2048/4096 this is exactly the K ≥ 2048 regime
+   where the FP4 tensor cores stream at their highest measured rates, and
+   the library's resident bytes drop 3.56× (NVFP4 vs BF16).
+2. **Why the naive path leaves it on the table:** a BF16 sweep must stream
+   2 B/entry/dimension from memory — at 10⁶ entries × 4096 dims that is
+   8.2 GB per sweep, bandwidth-bound long before the FLOPs matter.
+3. **What this path does:** the library stays resident in NVFP4; each tick
+   quantizes the (few) queries, sweeps them against the library in
+   262 144-entry chunks through the cuBLASLt block-scaled GEMM (f16 scores),
+   keeps a running top-64 per chunk, and re-ranks those 64 in BF16 —
+   exactness where ranking matters, FP4 where bytes dominate.
+   (`benchmarks/bench_retrieval.py`; two measured traps fixed on the way:
+   chunk sweeps must offset the packed/scale pointers per chunk — every
+   chunk was silently re-scanning chunk 0 until a planted-neighbor test
+   caught it — and `topk` must run in the scores' native dtype; the f32
+   cast doubled its cost and was the FP4 path's bottleneck at Q ≥ 32.)
+4. **Numbers** (`benchmarks/results/retrieval.txt`, 10⁶ unit-normalized
+   entries, load 7.3–9.5, 104–112 GB available; truth = exact BF16 sweep):
+
+   | dim | Q | FP4+re-rank | BF16 | speed | recall@1 | recall@64 |
+   |---|---|---|---|---|---|---|
+   | 2048 | 1 | 5.4 ms (185 q/s) | 17.8 ms | **3.29×** | 100 % | 84 % |
+   | 2048 | 32 | 7.7 ms (4 182 q/s) | 19.8 ms | **2.59×** | 96.9 % | 77 % |
+   | 2048 | 256 | 33.9 ms (7 562 q/s) | 40.5 ms | 1.20× | 98.4 % | 77 % |
+   | 4096 | 1 | 14.8 ms | 34.8 ms | **2.35×** | 100 % | 69 % |
+   | 4096 | 32 | 12.5 ms (2 568 q/s) | 36.5 ms | **2.93×** | 96.9 % | 76 % |
+   | 4096 | 256 | 33.5 ms (7 647 q/s) | 59.8 ms | **1.79×** | 96.9 % | 77 % |
+
+   With well-separated true neighbors (each query = a library entry +
+   noise — the realistic retrieval case) the FP4 sweep + BF16 re-rank finds
+   the true entry as top-1 **100 %** of the time at every Q and both dims.
+   The lower recall@64 in the random regime is the expected behavior on
+   near-ties: for random unit vectors the true ranks 1–64 sit inside FP4
+   score noise (relRMS ≈ 2.7e-3), so the top-64 *set* reshuffles while the
+   well-separated neighbors it exists to find do not.
+5. **What it makes possible:** `tiles-retrieval` / reflex libraries an order
+   of magnitude larger per resident GB (3.56×), swept 1.2–3.3× faster than
+   BF16 at the batch sizes a tick produces, with exact BF16 re-ranking of
+   the candidates — retrieval becomes a resident-FP4 workload.

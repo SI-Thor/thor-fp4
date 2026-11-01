@@ -72,7 +72,9 @@ template <class Tile, class Cluster>
 struct VTF {
     using ElementA = cutlass::mx_float8_t<cutlass::float_e4m3_t>;
     using ElementB = cutlass::mx_float4_t<cutlass::float_e2m1_t>;
-    using ElementD = cutlass::mx_float8_t<cutlass::float_e4m3_t>;
+    // D is the RAW e4m3 (example 92's pattern: the scaled-type wrappers are
+    // for mainloop operands; the epilogue's TMA store takes the raw type)
+    using ElementD = cutlass::float_e4m3_t;
     using ElementC = cutlass::bfloat16_t;
     using ElementAcc = float;
     using ArchTag = cutlass::arch::Sm100;   // compiled for sm_110a; see patches/
