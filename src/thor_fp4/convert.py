@@ -90,6 +90,12 @@ def convert(model: nn.Module, policy="auto", calibration: dict | None = None,
     """Replace nn.Linear layers per `policy`:
 
         policy="auto"          shape-aware: FP4 where the measured table wins
+        policy="mx8"           FP4 weights with MXFP8 activations (our CUTLASS
+                               engine) wherever eligible — the QUALITY policy
+                               for decision models (measured: recovers ~5
+                               top-1 points over FP4 activations, BENCHMARKS
+                               sec.5); ineligible layers fall through to
+                               shape-aware "auto"
         policy="fp4"           every eligible Linear -> thor_fp4.Linear
         policy="bf16"          cast everything to BF16 (the critic case)
         policy={"critic.*": "bf16", "*": "auto"}
@@ -103,19 +109,34 @@ def convert(model: nn.Module, policy="auto", calibration: dict | None = None,
     model = model if inplace else copy.deepcopy(model)
     table = load_shape_table()
     decisions: dict[str, str] = {}
-    replaces: list[tuple[str, nn.Linear]] = []
+    replaces: list[tuple[str, nn.Linear, str]] = []
     for name, m in model.named_modules():
         if isinstance(m, nn.Linear):
             spec = _match_policy(policy, name, m)
+            engine = "cublaslt"
             if spec == "auto":
                 spec = auto_decision(m.in_features, m.out_features, table).spec
             decisions[name] = spec
-            if spec == "fp4":
-                replaces.append((name, m))
-    for name, m in replaces:
+            if spec == "mx8":
+                # MXFP8 x MXFP4 needs the CUTLASS engine and K % 128 == 0;
+                # fall back to the shape-aware FP4 decision when not
+                from .linear import resolve_mx8_variant
+                try:
+                    if m.in_features % 128 != 0:
+                        raise ValueError(f"K={m.in_features} not a multiple of 128")
+                    engine = f"cutlass:{resolve_mx8_variant()}"
+                except (RuntimeError, ValueError) as e:
+                    fallback = auto_decision(m.in_features, m.out_features, table)
+                    decisions[name] = f"mx8-unavailable ({e}); {fallback.spec}: {fallback.reason}"
+                    spec = fallback.spec
+                else:
+                    decisions[name] = "mx8: FP4 weights x MXFP8 acts (quality policy)"
+            if spec in ("fp4", "mx8"):
+                replaces.append((name, m, engine))
+    for name, m, engine in replaces:
         try:
             new = Linear(m.in_features, m.out_features, bias=m.bias is not None,
-                         out_dtype=out_dtype, device=m.weight.device)
+                         out_dtype=out_dtype, device=m.weight.device, engine=engine)
             with torch.no_grad():
                 new.weight.copy_(m.weight.detach().float())
                 if m.bias is not None:

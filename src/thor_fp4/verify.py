@@ -100,15 +100,20 @@ class ReferenceLinear(nn.Module):
                        "f32": torch.float32}[self.out_dtype])
 
 
-def _compare(native: torch.Tensor, ref: torch.Tensor, bound: float) -> VerifyReport:
-    """bad = |native - ref| > bound * rms(ref): relative to the output's
-    magnitude scale, so near-zero elements do not false-alarm (a per-element
-    relative bound would flag every output that happens to round to ~0)."""
+def _compare(native: torch.Tensor, ref: torch.Tensor, bound: float,
+             ulp: float = 0.0) -> VerifyReport:
+    """bad = |native - ref| > bound * rms(ref) + ulp * |ref|: relative to the
+    output's magnitude scale (near-zero elements do not false-alarm), plus a
+    per-element half-ulp term so a single output-dtype rounding flip on a
+    large element (native and reference differ by f32 accumulation order
+    BEFORE rounding; values near a rounding boundary can flip one full ulp)
+    is not misread as a kernel error. bf16 outputs need ulp = 2^-8, f16
+    2^-11; real kernel errors are O(1) deviations and flag regardless."""
     rep = VerifyReport()
     n, r = native.float(), ref.float()
     scale = r.pow(2).mean().sqrt().clamp_min(1e-30)
     diff = (n - r).abs()
-    bad = diff > bound * scale
+    bad = diff > bound * scale + ulp * r.abs()
     rep.n_elements = n.numel()
     rep.n_bad = int(bad.sum().item())
     rep.rel_rms = float((diff.pow(2).mean().sqrt() / scale).item())
@@ -121,12 +126,22 @@ def _compare(native: torch.Tensor, ref: torch.Tensor, bound: float) -> VerifyRep
     return rep
 
 
+_OUT_ULP = {"f16": 2.0 ** -11, "bf16": 2.0 ** -8, "f32": 0.0}
+
+
 @torch.no_grad()
-def verify_linear(layer: Linear, x: torch.Tensor, bound: float = 1e-2) -> VerifyReport:
-    """Dual-path check of one thor_fp4.Linear on one input batch."""
+def verify_linear(layer: Linear, x: torch.Tensor, bound: float | None = None) -> VerifyReport:
+    """Dual-path check of one thor_fp4.Linear on one input batch. The default
+    bound is 1e-2, EXCEPT for engine_kind 'mx8' (5e-2): the CUTLASS mxfp8
+    epilogue applies block scales through a reciprocal approximation, which
+    puts that engine ~3e-3 relRMS (worst elements ~3e-2) above the fake-quant
+    reference even when healthy — measured in BENCHMARKS.md sec.3; real
+    kernel errors are O(1) deviations and flag at any bound."""
+    if bound is None:
+        bound = 5e-2 if getattr(layer, "engine_kind", "lt") == "mx8" else 1e-2
     native = layer(x)
     ref = ReferenceLinear(layer)(x)
-    return _compare(native, ref, bound)
+    return _compare(native, ref, bound, _OUT_ULP[layer.out_dtype])
 
 
 def _swap(root: nn.Module, name: str, new: nn.Module):
@@ -139,10 +154,11 @@ def _swap(root: nn.Module, name: str, new: nn.Module):
 
 
 @torch.no_grad()
-def verify(model_or_layer, inputs, bound: float = 1e-2) -> VerifyReport:
+def verify(model_or_layer, inputs, bound: float | None = None) -> VerifyReport:
     """Run `model_or_layer` on `inputs` through the native NVFP4 path and
     through the independent dequantize-then-matmul reference; report every
-    element disagreeing beyond `bound` (relative).
+    element disagreeing beyond `bound` (relative; per-layer engine defaults
+    when None — see verify_linear).
 
     model_or_layer: a thor_fp4.Linear, or any nn.Module containing them.
     Each thor_fp4.Linear is checked per-layer on the model's real activations,
@@ -201,10 +217,13 @@ def verify(model_or_layer, inputs, bound: float = 1e-2) -> VerifyReport:
             for name, m in fp4.items():
                 _swap(model, name, m)
         # rounding compounds across layers; scale the bound with depth
-        e2e_bound = bound * max(1, len(fp4)) ** 0.5
+        _eff = (lambda l: 5e-2 if getattr(l, "engine_kind", "lt") == "mx8" else 1e-2)  # per-engine default when bound is None
+        _b = bound if bound is not None else max(_eff(l) for l in fp4.values())
+        e2e_bound = _b * max(1, len(fp4)) ** 0.5
         sub = VerifyReport()
         for a, b in zip(outs_native, outs_ref):
-            sub.merge(_compare(a, b, e2e_bound))
+            ulp = {torch.float16: 2.0 ** -11, torch.bfloat16: 2.0 ** -8}.get(a.dtype, 0.0)
+            sub.merge(_compare(a, b, e2e_bound, ulp))
         rep.layers["<end-to-end>"] = sub
         rep.merge(sub)
     return rep

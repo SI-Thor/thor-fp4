@@ -92,3 +92,27 @@ def test_convert_deep_copy_default():
     with torch.no_grad():
         m.head.weight.zero_()
     assert mc.head.weight.abs().max().item() > 0
+
+
+@requires_cuda
+def test_convert_mx8_policy():
+    if thor_fp4._ext.cutlass() is None:
+        pytest.skip("needs build/libthorfp4_cutlass.so")
+    m = nn.Sequential(nn.Linear(512, 1024), nn.GELU(),
+                      nn.Linear(1024, 1024), nn.GELU(),
+                      nn.Linear(1024, 64)).cuda()
+    out = thor_fp4.convert(m, policy="mx8")
+    kinds = [mod.engine_kind for mod in out.modules() if isinstance(mod, thor_fp4.Linear)]
+    assert kinds == ["mx8", "mx8", "mx8"], kinds
+    x = torch.randn(16, 512, device="cuda")
+    y = out(x)
+    assert y.shape == (16, 64) and y.dtype == torch.bfloat16
+    rep = thor_fp4.verify(out, x)
+    assert rep.ok, str(rep)
+    # K not a multiple of 128 falls back to the shape-aware decision
+    m2 = nn.Sequential(nn.Linear(320, 640)).cuda()
+    out2 = thor_fp4.convert(m2, policy="mx8")
+    pol = list(out2.thor_fp4_policy.values())[0]
+    assert "mx8-unavailable" in pol
+    assert not any(isinstance(mod, thor_fp4.Linear) and mod.engine_kind == "mx8"
+                   for mod in out2.modules())

@@ -27,10 +27,31 @@ from .ops import NVFP4Tensor, MXTensor
 __all__ = ["Linear"]
 
 _DEFAULT_CUTLASS_VARIANTS = ["nvfp4_128x256x256_c2x1", "nvfp4_128x128x256_c1"]
+# FP8 activations x FP4 weights: preference order, first available wins
+_MX8_CUTLASS_VARIANTS = ["mxfp8xfp4_128x256x256_c2x1", "mxfp8xfp4_128x128x256_c2x1",
+                         "mxfp8xfp4_128x128x128_c2x1", "mxfp8xfp4_128x128x256_c1"]
+
+
+def resolve_mx8_variant() -> str:
+    """Name of the best available MXFP8-activation CUTLASS variant (for
+    engine='cutlass:mx8' and convert(policy='mx8')); ValueError if none."""
+    from . import _ext
+    L = _ext.cutlass()
+    if L is None:
+        raise RuntimeError("engine='cutlass:mx8' needs build/libthorfp4_cutlass.so (make cutlass)")
+    names = [bytes(L.tfc4_variant_name(i)).decode() for i in range(L.tfc4_n_variants())]
+    for c in _MX8_CUTLASS_VARIANTS:
+        if c in names:
+            return c
+    for n in names:
+        if n.startswith("mxfp8xfp4"):
+            return n
+    raise RuntimeError("no mxfp8xfp4 variant in libthorfp4_cutlass.so")
 
 
 def _resolve_engine(engine: str):
-    """'cublaslt' | 'gemv' | 'cutlass' | 'cutlass:<variant-name>' -> (kind, variant_idx).
+    """'cublaslt' | 'gemv' | 'cutlass' | 'cutlass:mx8' | 'cutlass:<variant>'
+    -> (kind, variant_idx).
 
     kind: 'lt' (cuBLASLt NVFP4), 'gv' (register-dequant GEMV, M<=8),
     'nv' (CUTLASS NVFP4xNVFP4), 'mx8' (CUTLASS MXFP8 activations x MXFP4
@@ -47,6 +68,8 @@ def _resolve_engine(engine: str):
         names = [bytes(L.tfc4_variant_name(i)).decode() for i in range(L.tfc4_n_variants())]
         name = next((c for c in _DEFAULT_CUTLASS_VARIANTS if c in names),
                     next(n for n in names if n.startswith("nvfp4_")))
+    elif engine == "cutlass:mx8":
+        name = resolve_mx8_variant()
     elif engine.startswith("cutlass:"):
         name = engine.split(":", 1)[1]
     else:
