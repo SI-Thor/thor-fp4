@@ -1,18 +1,18 @@
-# thor-fp4 bench_quality  cublasLt=130401  load=6.78 mem_avail=112GiB
-# models trained/loaded in 104s  load=10.22 mem_avail=112GiB
+# thor-fp4 bench_quality  cublasLt=130401  load=10.13 mem_avail=115GiB
+# models trained/loaded in 0s  load=10.13 mem_avail=115GiB
 
-== tile scorer [512, 1024, 1024, 64] (real tensor cores unless noted)  load=10.22 mem_avail=112GiB ==
+== tile scorer [512, 1024, 1024, 64] (real tensor cores unless noted)  load=10.13 mem_avail=115GiB ==
   BF16 baseline                      Q-MSE 0.0173  top1-teacher  61.1%  relRMS-vs-BF16 0.0000  top1-keep 100.0%
-  PTQ real fp4 (block-only)          Q-MSE 0.0754  top1-teacher  46.4%  relRMS-vs-BF16 0.6235  top1-keep  58.2%
-  PTQ real fp4 (two-level ts)        Q-MSE 0.0754  top1-teacher  46.4%  relRMS-vs-BF16 0.6235  top1-keep  58.2%
+  PTQ real fp4 (block-only)          Q-MSE 0.0218  top1-teacher  57.8%  relRMS-vs-BF16 0.1730  top1-keep  78.4%
+  PTQ real fp4 (two-level ts)        Q-MSE 0.0217  top1-teacher  57.3%  relRMS-vs-BF16 0.1708  top1-keep  78.5%
   PTQ fake fp4 (two-level ts)        Q-MSE 0.0217  top1-teacher  57.2%  relRMS-vs-BF16 0.1708  top1-keep  78.7%
   PTQ fake fp4 (block-only)          Q-MSE 0.0218  top1-teacher  57.7%  relRMS-vs-BF16 0.1730  top1-keep  78.2%
-  QAT real fp4 (block-only)          Q-MSE 0.1215  top1-teacher  10.1%  relRMS-vs-BF16 0.8379  top1-keep  11.2%
-  QAT fake fp4 (block-only)          Q-MSE 0.1173  top1-teacher  10.9%  relRMS-vs-BF16 0.8208  top1-keep  12.1%
+  QAT real fp4 (block-only)          Q-MSE 0.0233  top1-teacher  55.1%  relRMS-vs-BF16 0.2919  top1-keep  63.8%
+  QAT fake fp4 (block-only)          Q-MSE 0.0233  top1-teacher  54.9%  relRMS-vs-BF16 0.2919  top1-keep  63.9%
 
-== activation precision (weights MXFP4; fake quant)  load=10.22 mem_avail=111GiB ==
-  PTQ fake mx4w/mxfp4a               Q-MSE 0.0278  top1-teacher  53.9%  relRMS-vs-BF16 0.2671  top1-keep  71.5%
-  PTQ fake mx4w/mxfp8a               Q-MSE 0.0248  top1-teacher  56.5%  relRMS-vs-BF16 0.2265  top1-keep  77.6%
-# (mixed real path unavailable: ArgumentError: argument 10: TypeError: 'float' object cannot be interpreted as an integer)
+== activation precision (weights MXFP4; fake quant)  load=10.13 mem_avail=114GiB ==
+  PTQ fake mx4w/mxfp4a               Q-MSE 0.0305  top1-teacher  52.8%  relRMS-vs-BF16 0.2991  top1-keep  70.2%
+  PTQ fake mx4w/mxfp8a               Q-MSE 0.0279  top1-teacher  56.1%  relRMS-vs-BF16 0.2693  top1-keep  75.3%
+  PTQ real mx8a x fp4w (CUTLASS)     Q-MSE 0.0280  top1-teacher  56.1%  relRMS-vs-BF16 0.2699  top1-keep  75.4%
 
-# done  load=10.22 mem_avail=111GiB
+# done  load=10.13 mem_avail=114GiB

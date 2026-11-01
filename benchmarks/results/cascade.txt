@@ -1,66 +1,33 @@
-# thor-fp4 bench_cascade  cublasLt=130401  load=8.22 mem_avail=107GiB
+# thor-fp4 bench_cascade  cublasLt=130401  load=9.34 mem_avail=115GiB
 
-== PTQ (bf16-trained): fp4-vs-bf16 top-1 agreement 57.6% (gap to close: 42.4% of samples)  load=8.22 mem_avail=107GiB
+== PTQ (bf16-trained): fp4-vs-bf16 top-1 agreement 77.9% (gap to close: 22.1% of samples)  load=9.34 mem_avail=114GiB
 #         confidence  threshold  escalated  agreement gap recovered
-                        0.000       0.0%      57.6%          0.0%
-                        0.058      64.8%      93.5%         84.7%
-                        0.117      88.4%      99.3%         98.3%
-                        0.175      96.6%      99.9%         99.8%
-                        0.234      99.2%     100.0%        100.0%
-                        0.292      99.8%     100.0%        100.0%
-                        0.351      99.9%     100.0%        100.0%
-                        0.409     100.0%     100.0%        100.0%
-                        0.468     100.0%     100.0%        100.0%
-     softmax (mid)      0.023      70.2%      92.0%         81.2%
-# latency B=256 eager: cascade 2157.8 us  (fp4 392.3 us, bf16 106.5 us; escalation rate on this batch 0%)  load=7.96 mem_avail=106GiB
+                        0.000       0.0%      77.9%          0.0%
+                        0.140      61.8%      99.1%         96.1%
+                        0.279      87.1%     100.0%         99.9%
+                        0.419      96.2%     100.0%        100.0%
+                        0.559      99.0%     100.0%        100.0%
+                        0.699      99.8%     100.0%        100.0%
+                        0.838      99.9%     100.0%        100.0%
+                        0.978     100.0%     100.0%        100.0%
+                        1.118     100.0%     100.0%        100.0%
+     softmax (mid)      0.039      75.7%      98.5%         93.1%
+# latency B=256 eager: cascade 428.9 us  (fp4 173.4 us, bf16 57.3 us; escalation rate on this batch 0%)  load=9.34 mem_avail=114GiB
 # resident bytes: bf16 3.28 MB  fp4 0.92 MB (3.56x)
 
-== QAT: fp4-vs-bf16 top-1 agreement 11.1% (gap to close: 88.9% of samples)  load=7.96 mem_avail=106GiB
+== QAT: fp4-vs-bf16 top-1 agreement 63.1% (gap to close: 36.9% of samples)  load=9.34 mem_avail=114GiB
 #         confidence  threshold  escalated  agreement gap recovered
-                        0.000       0.0%      11.1%          0.0%
-                        0.013       6.3%      16.8%          6.4%
-                        0.025      23.3%      32.2%         23.8%
-                        0.038      52.7%      58.5%         53.3%
-                        0.050      81.0%      83.6%         81.6%
-                        0.063      95.4%      96.1%         95.6%
-                        0.076      99.4%      99.5%         99.4%
-                        0.088      99.9%     100.0%         99.9%
-                        0.101     100.0%     100.0%        100.0%
-     softmax (mid)      0.022      33.7%      41.4%         34.0%
-Traceback (most recent call last):
-  File "/home/caseydigennaro/lm-wt/thor-fp4/benchmarks/bench_cascade.py", line 100, in <module>
-    t_cas = timeit(cascade_eager)
-            ^^^^^^^^^^^^^^^^^^^^^
-  File "/home/caseydigennaro/lm-wt/thor-fp4/benchmarks/bench_cascade.py", line 42, in timeit
-    fn()
-  File "/home/caseydigennaro/lm-wt/thor-fp4/benchmarks/bench_cascade.py", line 96, in cascade_eager
-    return cas(xb.half())
-           ^^^^^^^^^^^^^^
-  File "/home/caseydigennaro/lm-wt/thor-fp4/.venv/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1787, in _wrapped_call_impl
-    return self._call_impl(*args, **kwargs)
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/home/caseydigennaro/lm-wt/thor-fp4/.venv/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1798, in _call_impl
-    return forward_call(*args, **kwargs)
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/home/caseydigennaro/lm-wt/thor-fp4/src/thor_fp4/cascade.py", line 51, in forward
-    out[esc] = self.slow(x[esc]).float()
-               ^^^^^^^^^^^^^^^^^
-  File "/home/caseydigennaro/lm-wt/thor-fp4/.venv/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1787, in _wrapped_call_impl
-    return self._call_impl(*args, **kwargs)
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/home/caseydigennaro/lm-wt/thor-fp4/.venv/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1798, in _call_impl
-    return forward_call(*args, **kwargs)
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/home/caseydigennaro/lm-wt/thor-fp4/.venv/lib/python3.12/site-packages/torch/nn/modules/container.py", line 259, in forward
-    input = module(input)
-            ^^^^^^^^^^^^^
-  File "/home/caseydigennaro/lm-wt/thor-fp4/.venv/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1787, in _wrapped_call_impl
-    return self._call_impl(*args, **kwargs)
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/home/caseydigennaro/lm-wt/thor-fp4/.venv/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1798, in _call_impl
-    return forward_call(*args, **kwargs)
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/home/caseydigennaro/lm-wt/thor-fp4/.venv/lib/python3.12/site-packages/torch/nn/modules/linear.py", line 134, in forward
-    return F.linear(input, self.weight, self.bias)
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-RuntimeError: mat1 and mat2 must have the same dtype, but got Half and BFloat16
+                        0.000       0.0%      63.1%          0.0%
+                        0.151      64.2%      94.9%         86.1%
+                        0.302      88.7%      99.7%         99.1%
+                        0.453      96.9%     100.0%        100.0%
+                        0.604      99.4%     100.0%        100.0%
+                        0.754      99.8%     100.0%        100.0%
+                        0.905     100.0%     100.0%        100.0%
+                        1.056     100.0%     100.0%        100.0%
+                        1.207     100.0%     100.0%        100.0%
+     softmax (mid)      0.038      70.3%      95.0%         86.5%
+# latency B=256 eager: cascade 547.0 us  (fp4 201.4 us, bf16 63.8 us; escalation rate on this batch 0%)  load=9.07 mem_avail=113GiB
+# resident bytes: bf16 3.28 MB  fp4 0.92 MB (3.56x)
+
+# done  load=9.07 mem_avail=113GiB

@@ -57,9 +57,11 @@ def auto_decision(in_features: int, out_features: int, table: dict | None = None
     if key in table.get("shapes", {}):
         # rows are per-batch: {"4096": {...}, "256": {...}}; the M=4096 row
         # is the serving case the crossover rule is derived from
-        row = table["shapes"][key].get("4096") or next(iter(table["shapes"][key].values()))
+        entry = table["shapes"][key]
+        row = entry if "fp4_ms" in entry else (entry.get("4096")
+                                               or next(iter(entry.values())))
         spec = "fp4" if row.get("fp4_wins", False) else "bf16"
-        return Decision(spec, f"measured at M={row.get('m', 4096)}: fp4 {row['fp4_ms']:.4f} ms "
+        return Decision(spec, f"measured: fp4 {row['fp4_ms']:.4f} ms "
                               f"vs bf16 {row['bf16_ms']:.4f} ms (quantize included)")
     if in_features >= cross["min_k"] and out_features >= cross["min_n"]:
         return Decision("fp4", f"K={in_features} >= {cross['min_k']} and N={out_features} >= "
