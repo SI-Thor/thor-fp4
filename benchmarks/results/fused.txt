@@ -1,0 +1,20 @@
+# thor-fp4 bench_fused  load=7.84 mem_avail=110GiB
+# fused: 1 kernel/layer (gemm+bias+gelu+mx8-quantize epilogue)
+# two-pass: quantize_mx kernel + mx8 gemm + bias/gelu in torch
+
+== single hidden layer, M=4096 (quantize included both sides) ==
+     N      K | two-pass us  fused us  speed
+  1024    512 |       398.0     372.3  1.07x
+  1024   1024 |       529.6     478.4  1.11x
+  2048   2048 |      1259.2    1022.2  1.23x
+  5120   1280 |      2317.0    1051.3  2.20x
+  1280   5120 |      1860.5    1781.2  1.04x
+
+== scorer chain 512->1024->1024->64 (mx8 both) ==
+   B |  two eager  two graph | fused eager fused graph |   ratio
+   1 |     151.8u      50.3u |      102.0u       43.7u |  1.49x eager  1.15x graph
+  32 |     160.6u      55.8u |      103.2u       45.6u |  1.56x eager  1.22x graph
+ 256 |     164.1u     100.7u |      103.6u       54.0u |  1.58x eager  1.87x graph
+4096 |     964.8u    1027.2u |      650.0u      562.0u |  1.48x eager  1.83x graph
+
+# load=7.86 mem_avail=109GiB

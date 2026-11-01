@@ -43,16 +43,37 @@ class MX8Act:
         M, K = self.shape
         return M * (K + K // 32)
 
+    def rows(self, a: int, b: int) -> "MX8Act":
+        """Rows [a, b) as an MX8Act of view buffers. Both packed codes (K
+        bytes/row, row-major) and scales (128-row tiles) are row-major
+        prefixes, so a 128-multiple slice is a clean prefix of each."""
+        from . import ops
+        M, K = self.shape
+        assert a % 128 == 0 or a == 0, "slices must be 128-row aligned"
+        return MX8Act(
+            self.packed[a * K:(b - 1) * K + ops.mx_packed_bytes(b - a, K, "mxfp8")],
+            self.sblk[ops.mx_scale_bytes(a, K):ops.mx_scale_bytes(a, K)
+                      + ops.mx_scale_bytes(b - a, K)],
+            (b - a, K))
+
 
 class FusedLinear(nn.Module):
     """y_codes, y_scales = quantize_mx8( gelu( x_codes @ W_mxfp4^T + bias ) )
     — the whole inter-layer glue of an MLP hidden layer in the GEMM's
     epilogue. Consumes and returns MX8Act (a plain tensor is quantized once
     on entry). The returned buffers are reused per batch shape (capture-safe
-    like thor_fp4.Linear)."""
+    like thor_fp4.Linear).
+
+    EXPERIMENTAL (measured on this box, CUTLASS 4.4.1 on sm_110a): at batch
+    M >= ~2048, through this wrapper's allocation pattern, scattered rows
+    (~0.2%) received ue8m0-NaN scale bytes — deterministic, reproducible,
+    and absent in direct ABI calls with fresh buffers at every M, i.e. an
+    epilogue-path fragility we could not pin to our own code. Rows are
+    computed independently, so forward() batches through max_chunk-row
+    slices (512 by default; measured clean at every size tried)."""
 
     def __init__(self, in_features: int, out_features: int, bias: bool = True,
-                 variant: str | None = None, device=None):
+                 variant: str | None = None, device=None, max_chunk: int = 512):
         super().__init__()
         if in_features % 128 != 0:
             raise ValueError(f"in_features={in_features}: the fused epilogue needs K % 128 == 0")
@@ -77,6 +98,7 @@ class FusedLinear(nn.Module):
         nn.init.kaiming_uniform_(self.weight, a=5 ** 0.5)
         self._w: ops.MXTensor | None = None
         self._outs: dict[int, MX8Act] = {}
+        self.max_chunk = max_chunk
 
     def _apply(self, fn, recurse=True):
         self._w = None
@@ -92,6 +114,23 @@ class FusedLinear(nn.Module):
         with torch.no_grad():
             if self._w is None:
                 self.refresh_weight()
+            Mfull = x.shape[0] if not hasattr(x, "packed") else x.shape[0]
+            if self.max_chunk and Mfull > self.max_chunk:
+                # cache one output buffer per (batch, chunk index) — a single
+                # per-M cache would make every chunk overwrite the previous
+                outs = []
+                for ci, i in enumerate(range(0, Mfull, self.max_chunk)):
+                    sl = x[i:i + self.max_chunk] if not hasattr(x, "packed") \
+                        else x.rows(i, min(i + self.max_chunk, Mfull))
+                    outs.append(self._forward_once(sl, ci))
+                return MX8Act(
+                    torch.cat([o.packed for o in outs]),
+                    torch.cat([o.sblk for o in outs]),
+                    (Mfull, self.out_features))
+            return self._forward_once(x)
+
+    def _forward_once(self, x, chunk: int = 0):
+        with torch.no_grad():
             if isinstance(x, MX8Act):
                 M = x.shape[0]
                 act = x
@@ -107,14 +146,14 @@ class FusedLinear(nn.Module):
                                    dtype=torch.uint8, device=xc.device)
                 ops.quantize_mx(xc.float(), "mxfp8", packed, sblk)
                 act = MX8Act(packed, sblk, (M, self.in_features))
-            out = self._outs.get(M)
+            out = self._outs.get((M, chunk))
             if out is None:
                 N = self.out_features
                 dp = torch.zeros(M * N, dtype=torch.uint8, device=act.packed.device)
                 sf = torch.zeros(int(_ext.fused().tfc4f_sfd_bytes(M, N)),
                                  dtype=torch.uint8, device=act.packed.device)
                 out = MX8Act(dp, sf, (M, N))
-                self._outs[M] = out
+                self._outs[(M, chunk)] = out
             bias = (self.bias if self.bias is not None
                     else torch.zeros(self.out_features, device=act.packed.device))
             rc = _ext.fused().tfc4f_gemm(

@@ -94,7 +94,7 @@ def main():
 
     lines.append("")
     lines.append("== scorer chain 512->1024->1024->64 (mx8 both) ==")
-    lines.append(f"{'B':>4} | {'two eager':>10} {'two graph':>10} | {'fused eager':>11} {'fused graph':>11} | {'best speed':>10}")
+    lines.append(f"{'B':>4} | {'two eager':>10} {'two graph':>10} | {'fused eager':>11} {'fused graph':>11} |   ratio")
     for B in (1, 32, 256, 4096):
         x = torch.randn(B, DIMS[0], device="cuda")
         with torch.no_grad():
@@ -109,9 +109,8 @@ def main():
         except Exception as e:
             print(f"# graph capture failed at B={B}: {e}")
             tg = fg = float("nan")
-        best = min(tg, fg)
-        speed = max(te, tg) / best
-        lines.append(f"{B:>4} | {te:>9.1f}u {tg:>9.1f}u | {fe:>10.1f}u {fg:>10.1f}u | {speed:>9.2f}x")
+        lines.append(f"{B:>4} | {te:>9.1f}u {tg:>9.1f}u | {fe:>10.1f}u {fg:>10.1f}u |"
+                     f" {te/fe:>5.2f}x eager {tg/fg:>5.2f}x graph")
     lines.append("")
     lines.append(f"# {boxstate()}")
     out = "\n".join(lines)

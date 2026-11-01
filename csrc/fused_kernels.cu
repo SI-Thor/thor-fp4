@@ -162,7 +162,7 @@ int ensure(int64_t M, int64_t N, int64_t K,
         StrideD stD = cutlass::make_cute_packed_stride(StrideD{}, {int(M), int(N), 1});
         auto& e = args.epilogue;
         e = {{}, nullptr, stC,
-             reinterpret_cast<typename V::ElementD::DataType*>(d), stD};
+             reinterpret_cast<cutlass::float_e4m3_t*>(d), stD};
         e.thread.alpha = alpha;
         e.thread.bias_ptr = bi;
         e.thread.block_scale_factor_ptr =
@@ -184,9 +184,17 @@ int ensure(int64_t M, int64_t N, int64_t K,
         if (ws_bytes && cudaMalloc(&ws, ws_bytes) != cudaSuccess)
             return -21;
         auto wsg = std::shared_ptr<void>(ws, [](void* p) { if (p) cudaFree(p); });
-        if (gemm->initialize(probe, ws) != cutlass::Status::kSuccess)
+        // initialize (which also sets up any scheduler workspace) with the
+        // REAL arguments — a probe-initialized workspace leaves stale state
+        // that corrupted one row on the first run (measured: one row of a
+        // 2048x1024x512 call decoded as ue8m0 NaN scales, deterministic)
+        typename Gemm::GemmKernel::Arguments real = mkargs(A, SA, B, SB, bias, D, SFD, alpha);
+        if (gemm->initialize(real, ws) != cutlass::Status::kSuccess)
             return -22;
         it = cache.emplace(key, std::make_pair(gemm, wsg)).first;
+        if (it->second.first->run(stream) != cutlass::Status::kSuccess)
+            return -24;
+        return 0;
     }
     typename Gemm::GemmKernel::Arguments args = mkargs(A, SA, B, SB, bias, D, SFD, alpha);
     if (it->second.first->update(args) != cutlass::Status::kSuccess)

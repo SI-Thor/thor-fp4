@@ -173,13 +173,17 @@ class Linear(nn.Module):
                 self.refresh_weight()
             w = self._weight_fp4
             M = x.shape[0]
-            x = x.detach() if x.requires_grad else x
-            if not x.is_contiguous():
-                x = x.contiguous()
-            dt = x.dtype
-            if dt not in (torch.float32, torch.float16, torch.bfloat16):
-                x = x.float()
-                dt = torch.float32
+            packed_in = hasattr(x, "packed") and hasattr(x, "sblk")
+            if not packed_in:
+                x = x.detach() if x.requires_grad else x
+                if not x.is_contiguous():
+                    x = x.contiguous()
+                dt = x.dtype
+                if dt not in (torch.float32, torch.float16, torch.bfloat16):
+                    x = x.float()
+                    dt = torch.float32
+            else:
+                dt = "mx8act"
             key = (M, dt)
             if self.engine_kind == "gv":
                 # register-dequant GEMV: no activation quantize buffers; the
@@ -198,6 +202,23 @@ class Linear(nn.Module):
                 if self.bias is not None:
                     out += self.bias.to(out.dtype)
                 return out
+            if packed_in and self.engine_kind == "mx8":
+                # already-packed MXFP8 (a fused.py FusedLinear output):
+                # consume directly — no quantize pass for the chain
+                from . import _ext
+                o2 = self._act_bufs.get((M, "mx8act"))
+                if o2 is None:
+                    o2 = torch.empty(M, self.out_features, dtype=torch.bfloat16,
+                                     device=x.packed.device)
+                    self._act_bufs[(M, "mx8act")] = o2
+                rc = _ext.cutlass().tfc4_gemm(
+                    self.engine_variant, x.packed.data_ptr(), x.sblk.data_ptr(),
+                    w.packed.data_ptr(), w.sblk.data_ptr(), o2.data_ptr(),
+                    M, self.out_features, self.in_features, 1.0, _ext.stream())
+                assert rc == 0, f"tfc4_gemm rc={rc}"
+                if self.bias is not None:
+                    o2 += self.bias.to(o2.dtype)
+                return o2
             bufs = self._act_bufs.get(key)
             if bufs is None:
                 if self.engine_kind == "mx8":
@@ -234,24 +255,6 @@ class Linear(nn.Module):
             else:
                 # MXFP8 activations x MXFP4 weights: the mix cuBLASLt refuses
                 from . import _ext
-                if hasattr(x, "packed") and hasattr(x, "sblk"):
-                    # already-packed MXFP8 (a fused.py FusedLinear output):
-                    # consume directly — no quantize pass for the chain
-                    key = (x.shape[0], "mx8act")
-                    o2 = self._act_bufs.get(key)
-                    if o2 is None:
-                        o2 = torch.empty(x.shape[0], self.out_features,
-                                         dtype=torch.bfloat16, device=x.packed.device)
-                        self._act_bufs[key] = o2
-                    rc = _ext.cutlass().tfc4_gemm(
-                        self.engine_variant, x.packed.data_ptr(), x.sblk.data_ptr(),
-                        w.packed.data_ptr(), w.sblk.data_ptr(), o2.data_ptr(),
-                        x.shape[0], self.out_features, self.in_features,
-                        1.0, _ext.stream())
-                    assert rc == 0, f"tfc4_gemm rc={rc}"
-                    if self.bias is not None:
-                        o2 += self.bias.to(o2.dtype)
-                    return o2
                 ops.quantize_mx(x, "mxfp8", packed, sblk)
                 rc = _ext.cutlass().tfc4_gemm(
                     self.engine_variant, packed.data_ptr(), sblk.data_ptr(),
@@ -263,7 +266,8 @@ class Linear(nn.Module):
             return out
 
     def extra_repr(self) -> str:
-        ts = (self._weight_fp4.tensor_scale if self._weight_fp4 is not None
+        ts = (self._weight_fp4.tensor_scale
+              if self._weight_fp4 is not None and hasattr(self._weight_fp4, "tensor_scale")
               else self._tensor_scale_requested)
         eng = {"lt": "cublaslt", "gv": "gemv"}.get(
             self.engine_kind, f"cutlass:{self.engine_variant}")

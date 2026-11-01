@@ -444,3 +444,50 @@ bit-identical to eager (`test_cutlass_graph_capture`,
    of magnitude larger per resident GB (3.56×), swept 1.2–3.3× faster than
    BF16 at the batch sizes a tick produces, with exact BF16 re-ranking of
    the candidates — retrieval becomes a resident-FP4 workload.
+
+## 10. The fused chain: quantization in the epilogue (ROUND 2, DIRECTIONS §4)
+
+1. **Hardware fact:** the tcgen05 mainloop's accumulators are f32 registers
+   inside the GEMM; CUTLASS's sm100 epilogue can finish a layer there —
+   bias, erf-GELU (identical to torch's), and MXFP8 quantization of the
+   output (e4m3 codes + UE8M0-per-32 scales, written in the same tile atom
+   the next GEMM reads).
+2. **Why the two-pass chain pays more:** each standalone pass is a full
+   read+write over the activations — the quantize pass is the measured
+   dominant cost of small-K FP4 layers (§2), and torch's gelu and bias adds
+   are two more passes.
+3. **What was built:** `csrc/fused_kernels.cu` (4 tile/cluster variants,
+   C ABI `tfc4f_*`) + `thor_fp4.fused` (`FusedLinear`, `MX8Act`,
+   `mx8_chain`): a chain of N layers runs as N GEMMs and nothing else; the
+   epilogue's scale recipe is ceil-power-of-two (never clips a block max;
+   our standalone `quantize_mx` rounds to nearest, which can clip the block
+   max by up to ~34 % of 448 on ties that round down).
+4. **Numbers** (`benchmarks/results/fused.txt`, load 5.9–7.9, 79–109 GB
+   available; scorer 512→1024→1024→64, both paths on the CUTLASS mx8
+   engine):
+
+   | | two-pass (quantize+GEMM+gelu+bias) | fused (1 kernel/layer) | speed |
+   |---|---|---|---|
+   | layer 1024×512, M=4096 | 398 µs | 372 µs | 1.07× |
+   | layer 5120×1280, M=4096 | 2317 µs | 1051 µs | **2.20×** |
+   | chain B=256, eager | 164 µs | 104 µs | 1.58× |
+   | chain B=256, CUDA graph | 101 µs | 54 µs | **1.87×** |
+   | chain B=4096, graph | 1027 µs | 562 µs | **1.83×** |
+
+   Quality on the scorer (`quality.txt`): the fused chain keeps **77.1 %**
+   of BF16 top-1 — slightly better than the two-pass mx8 chain's 75.4 %,
+   because the epilogue computes GELU on the f32 accumulators (the two-pass
+   chain gelus the bf16-rounded GEMM output) and its ceil-pow2 scales never
+   clip a block max.
+5. **Honest caveat — EXPERIMENTAL:** through the wrapper's allocation
+   pattern, batches ≥ ~2048 hit scattered rows (~0.2 %) whose scale bytes
+   decode as ue8m0-NaN — deterministic, absent in direct ABI calls with
+   fresh buffers at every size we tried, and not attributable to any of our
+   own pointer handling after bisection; the same class of finding as the
+   MXFP4×MXFP4 verdict in §3. `FusedLinear` therefore batches through
+   512-row slices (measured clean at every size; rows are independent), and
+   the B=4096 rows above include that chunking overhead — the unchunked
+   kernel measured 1.7–3.2× before the mitigation. What it makes possible,
+   once the epilogue path is trusted: decision MLPs at one kernel per layer
+   with no activation-quantize passes anywhere — the missing small-K piece
+   of DIRECTIONS §4's metal-shaped models.
