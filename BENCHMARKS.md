@@ -462,32 +462,57 @@ bit-identical to eager (`test_cutlass_graph_capture`,
    epilogue's scale recipe is ceil-power-of-two (never clips a block max;
    our standalone `quantize_mx` rounds to nearest, which can clip the block
    max by up to ~34 % of 448 on ties that round down).
-4. **Numbers** (`benchmarks/results/fused.txt`, load 5.9–7.9, 79–109 GB
+4. **Numbers** (`benchmarks/results/fused.txt`, load 10.8–11.4, 86–87 GiB
    available; scorer 512→1024→1024→64, both paths on the CUTLASS mx8
-   engine):
+   engine; R3-0 numbers — correct per-column bias, unchunked):
 
    | | two-pass (quantize+GEMM+gelu+bias) | fused (1 kernel/layer) | speed |
    |---|---|---|---|
-   | layer 1024×512, M=4096 | 398 µs | 372 µs | 1.07× |
-   | layer 5120×1280, M=4096 | 2317 µs | 1051 µs | **2.20×** |
-   | chain B=256, eager | 164 µs | 104 µs | 1.58× |
-   | chain B=256, CUDA graph | 101 µs | 54 µs | **1.87×** |
-   | chain B=4096, graph | 1027 µs | 562 µs | **1.83×** |
+   | layer 1024×512, M=4096 | 373 µs | 249 µs | 1.50× |
+   | layer 1024×1024, M=4096 | 515 µs | 385 µs | 1.34× |
+   | layer 2048×2048, M=4096 | 1237 µs | 793 µs | 1.56× |
+   | layer 5120×1280, M=4096 | 2240 µs | 874 µs | **2.56×** |
+   | layer 1280×5120, M=4096 | 1835 µs | 1674 µs | 1.10× |
+   | chain B=256, eager | 160 µs | 106 µs | 1.51× |
+   | chain B=256, CUDA graph | 102 µs | 59 µs | **1.74×** |
+   | chain B=4096, eager | 962 µs | 381 µs | **2.53×** |
+   | chain B=4096, CUDA graph | 1019 µs | 410 µs | **2.48×** |
 
-   Quality on the scorer (`quality.txt`): the fused chain keeps **77.1 %**
-   of BF16 top-1 — slightly better than the two-pass mx8 chain's 75.4 %,
-   because the epilogue computes GELU on the f32 accumulators (the two-pass
-   chain gelus the bf16-rounded GEMM output) and its ceil-pow2 scales never
-   clip a block max.
-5. **Honest caveat — EXPERIMENTAL:** through the wrapper's allocation
-   pattern, batches ≥ ~2048 hit scattered rows (~0.2 %) whose scale bytes
-   decode as ue8m0-NaN — deterministic, absent in direct ABI calls with
-   fresh buffers at every size we tried, and not attributable to any of our
-   own pointer handling after bisection; the same class of finding as the
-   MXFP4×MXFP4 verdict in §3. `FusedLinear` therefore batches through
-   512-row slices (measured clean at every size; rows are independent), and
-   the B=4096 rows above include that chunking overhead — the unchunked
-   kernel measured 1.7–3.2× before the mitigation. What it makes possible,
-   once the epilogue path is trusted: decision MLPs at one kernel per layer
-   with no activation-quantize passes anywhere — the missing small-K piece
-   of DIRECTIONS §4's metal-shaped models.
+   Quality on the scorer (`quality.txt`, R3-0): the fused chain keeps
+   **78.1 %** of BF16 top-1 (relRMS 0.209) vs the two-pass mx8 chain's
+   75.4 %, because the epilogue computes GELU on the f32 accumulators (the
+   two-pass chain gelus the bf16-rounded GEMM output) and its ceil-pow2
+   scales never clip a block max.
+5. **R3-0 (2026-11-01): the round-2 NaN-scale rows, root-caused.** The
+   software fact: the epilogue op was CUTLASS's
+   `LinCombPerRowBiasEltActBlockScaleFactor`, whose bias node
+   (`Sm90ColBroadcast`, stride `_1,_0`) computes `D[m,n] += bias[m]` — a
+   vector indexed by output **row** — while `FusedLinear` passes
+   `nn.Linear`'s bias, an **N**-float vector meant as `bias[n]`. Why the
+   old path failed: for M > N the per-row read ran past the N-float buffer
+   into whatever allocation followed; float patterns there that decode as
+   NaN made that whole row NaN (acc+NaN → GELU → NaN e4m3 codes and
+   ue8m0-NaN scales). That matches every observation: bad only at M > N
+   (=1024 — the "M ≥ ~2048" below was really M > N); whole-row scope;
+   deterministic per neighbouring allocation ("address dependence");
+   independent of the bias values; clean at `bias_ptr=nullptr`; inputs
+   never written. What changed: one typedef in `csrc/fused_kernels.cu` —
+   the op is now `LinCombPerColBiasEltActBlockScaleFactor` (bias node
+   `Sm90RowBroadcast`, stride `_0,_1`, `D[m,n] += bias[n]`, always
+   in-bounds; same SFD store, same Arguments). The 512-row chunking
+   mitigation is retired (`max_chunk=0` default), and the fused layers now
+   add the bias the nn.Linear drop-in contract promises (all fused tests
+   used zero biases before, which is why the wrong semantics never failed a
+   test; there are nonzero-bias and NaN-bait regression tests now — 104
+   green). Bisection trail and dead ends: `NOTES.md` (scripts:
+   `benchmarks/repro_nan*.py`). What it makes possible: decision MLPs at
+   one kernel per layer with no activation-quantize passes anywhere, at
+   every batch size — the missing small-K piece of DIRECTIONS §4's
+   metal-shaped models.
+
+   **Superseded (round 2, wrong-bias path, load 5.9–7.9, 79–109 GB
+   available):** ~~layer 1024×512 M=4096 1.07×, layer 5120×1280 M=4096
+   2.20×; chain B=256 eager 1.58×, graph 1.87×; chain B=4096 graph 1.83×
+   (all with the 512-row chunking mitigation); fused quality 77.1 % top-1
+   keep.~~ Those numbers were measured through the per-row-bias read and
+   with chunking; use the R3-0 table above.

@@ -62,18 +62,18 @@ class FusedLinear(nn.Module):
     — the whole inter-layer glue of an MLP hidden layer in the GEMM's
     epilogue. Consumes and returns MX8Act (a plain tensor is quantized once
     on entry). The returned buffers are reused per batch shape (capture-safe
-    like thor_fp4.Linear).
+    like thor_fp4.Linear). The bias is the nn.Linear per-column vector:
+    D[m, n] += bias[n].
 
-    EXPERIMENTAL (measured on this box, CUTLASS 4.4.1 on sm_110a): at batch
-    M >= ~2048, through this wrapper's allocation pattern, scattered rows
-    (~0.2%) received ue8m0-NaN scale bytes — deterministic, reproducible,
-    and absent in direct ABI calls with fresh buffers at every M, i.e. an
-    epilogue-path fragility we could not pin to our own code. Rows are
-    computed independently, so forward() batches through max_chunk-row
-    slices (512 by default; measured clean at every size tried)."""
+    History (R3-0, 2026-11-01): through round 2 the epilogue op read the
+    bias per ROW (bias[m], CUTLASS's PerRowBias), so at M > N it read past
+    the N-float buffer and whole rows came out NaN (the §10 caveat). The op
+    is now PerColBias (bias[n]) and the chunking mitigation is retired;
+    `max_chunk` remains available but defaults to unchunked. See NOTES.md
+    for the bisection and BENCHMARKS.md §10 for the corrected numbers."""
 
     def __init__(self, in_features: int, out_features: int, bias: bool = True,
-                 variant: str | None = None, device=None, max_chunk: int = 512):
+                 variant: str | None = None, device=None, max_chunk: int = 0):
         super().__init__()
         if in_features % 128 != 0:
             raise ValueError(f"in_features={in_features}: the fused epilogue needs K % 128 == 0")

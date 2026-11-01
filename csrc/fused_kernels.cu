@@ -27,7 +27,8 @@
 //
 // Constraints (can_implement + measured): K % 128 == 0, N % 32 == 0 (the SF
 // store tiles), N % 16 == 0 (e4m3 D alignment), bias is required (the EVT
-// reads the bias pointer unconditionally — pass zeros for bias-free layers).
+// reads the bias pointer unconditionally — pass zeros for bias-free layers)
+// and is an N-vector indexed by output column n: D[m,n] += bias[n].
 //
 // C ABI (prefix tfc4f_):
 //   tfc4f_n_variants() / tfc4f_variant_name(i) / tfc4f_variant_index(name)
@@ -80,10 +81,16 @@ struct VTF {
     using ArchTag = cutlass::arch::Sm100;   // compiled for sm_110a; see patches/
     using OpClass = cutlass::arch::OpClassBlockScaledTensorOp;
 
-    using FusionOperation = cutlass::epilogue::fusion::LinCombPerRowBiasEltActBlockScaleFactor<
+    // PerColBias = a bias VECTOR INDEXED BY OUTPUT COLUMN n (D[m,n] gets
+    // bias[n]) — nn.Linear semantics. The PerRowBias op we used through
+    // ROUND 2 reads bias[m]: semantically wrong for nn.Linear (masked in
+    // tests by zero-initialized biases) and, for M > N, an out-of-bounds
+    // read of the N-float bias buffer — the source of the ue8m0-NaN rows
+    // (BENCHMARKS sec.10 caveat; root-caused 2026-11-01, see NOTES.md).
+    using FusionOperation = cutlass::epilogue::fusion::LinCombPerColBiasEltActBlockScaleFactor<
         cutlass::epilogue::thread::GELU, 32,
         ElementD, float, cutlass::float_ue8m0_t,
-        cutlass::layout::RowMajor,   // scalefactor layout tag
+        cutlass::layout::RowMajor,   // scalefactor layout tag (the row SF store)
         float,                       // ElementBias (fp32, like thor_fp4.Linear)
         ElementC, float, 4>;
 
@@ -223,6 +230,121 @@ const FVariant kFVariants[] = {
 };
 constexpr int kNFVariants = int(sizeof(kFVariants) / sizeof(kFVariants[0]));
 
+// R3-0 bisection helpers: run one GEMM with per-call lifecycle variants so the
+// cached ensure() path can be compared against a fresh object / re-initialized
+// workspace / re-initialized workspace with a fresh allocation.
+enum RunMode { kCached = 0, kReinitWs = 1, kFreshObject = 2, kFreshWs = 3 };
+
+template <class V>
+int run_mode(int mode, int64_t M, int64_t N, int64_t K,
+             const void* A, const void* SA, const void* B, const void* SB,
+             const float* bias, void* D, void* SFD, float alpha,
+             cudaStream_t stream) {
+    using Gemm = typename V::Gemm;
+    if (mode == kCached)
+        return ensure<V>(M, N, K, A, SA, B, SB, bias, D, SFD, alpha, stream);
+    // build arguments the same way ensure() does
+    typename Gemm::GemmKernel::Arguments args{};
+    args.mode = cutlass::gemm::GemmUniversalMode::kGemm;
+    args.problem_shape = {int(M), int(N), int(K), 1};
+    using StrideA = typename Gemm::GemmKernel::StrideA;
+    using StrideB = typename Gemm::GemmKernel::StrideB;
+    using StrideC = typename Gemm::GemmKernel::StrideC;
+    using StrideD = typename Gemm::GemmKernel::StrideD;
+    StrideA stA = cutlass::make_cute_packed_stride(StrideA{}, {int(M), int(K), 1});
+    StrideB stB = cutlass::make_cute_packed_stride(StrideB{}, {int(N), int(K), 1});
+    auto lSFA = Gemm::GemmKernel::CollectiveMainloop::Sm1xxBlkScaledConfig::
+        tile_atom_to_shape_SFA(cute::make_shape(int(M), int(N), int(K), 1));
+    auto lSFB = Gemm::GemmKernel::CollectiveMainloop::Sm1xxBlkScaledConfig::
+        tile_atom_to_shape_SFB(cute::make_shape(int(M), int(N), int(K), 1));
+    args.mainloop = {
+        reinterpret_cast<const typename V::ElementA::DataType*>(A), stA,
+        reinterpret_cast<const typename V::ElementB::DataType*>(B), stB,
+        reinterpret_cast<const typename V::ElementA::ScaleFactorType*>(SA), lSFA,
+        reinterpret_cast<const typename V::ElementB::ScaleFactorType*>(SB), lSFB};
+    StrideC stC = cutlass::make_cute_packed_stride(StrideC{}, {int(M), int(N), 1});
+    StrideD stD = cutlass::make_cute_packed_stride(StrideD{}, {int(M), int(N), 1});
+    args.epilogue = {{}, nullptr, stC,
+                     reinterpret_cast<cutlass::float_e4m3_t*>(D), stD};
+    args.epilogue.thread.alpha = alpha;
+    args.epilogue.thread.bias_ptr = bias;
+    args.epilogue.thread.block_scale_factor_ptr =
+        reinterpret_cast<cutlass::float_ue8m0_t*>(SFD);
+    args.epilogue.thread.norm_constant_ptr = norm_one();
+
+    static std::mutex mu;
+    std::lock_guard<std::mutex> lk(mu);
+    if (mode == kReinitWs) {
+        // cached object, but initialize() again before every run
+        static std::map<std::tuple<int64_t, int64_t, int64_t>,
+                        std::pair<std::shared_ptr<Gemm>, std::shared_ptr<void>>> cache;
+        auto key = std::make_tuple(M, N, K);
+        auto it = cache.find(key);
+        if (it == cache.end()) {
+            auto gemm = std::make_shared<Gemm>();
+            size_t ws_bytes = Gemm::get_workspace_size(args);
+            void* ws = nullptr;
+            if (ws_bytes && cudaMalloc(&ws, ws_bytes) != cudaSuccess) return -31;
+            auto wsg = std::shared_ptr<void>(ws, [](void* p) { if (p) cudaFree(p); });
+            if (gemm->initialize(args, ws) != cutlass::Status::kSuccess) return -32;
+            it = cache.emplace(key, std::make_pair(gemm, wsg)).first;
+        } else {
+            if (it->second.first->initialize(args, it->second.second.get())
+                != cutlass::Status::kSuccess)
+                return -33;
+        }
+        return it->second.first->run(stream) == cutlass::Status::kSuccess ? 0 : -34;
+    }
+    if (mode == kFreshWs) {
+        // cached object, but a FRESH cudaMalloc'd workspace + initialize per run
+        static std::map<std::tuple<int64_t, int64_t, int64_t>,
+                        std::shared_ptr<Gemm>> cache;
+        auto key = std::make_tuple(M, N, K);
+        auto it = cache.find(key);
+        if (it == cache.end()) {
+            auto gemm = std::make_shared<Gemm>();
+            it = cache.emplace(key, gemm).first;
+        }
+        size_t ws_bytes = Gemm::get_workspace_size(args);
+        void* ws = nullptr;
+        if (ws_bytes && cudaMalloc(&ws, ws_bytes) != cudaSuccess) return -35;
+        auto wsg = std::shared_ptr<void>(ws, [](void* p) { if (p) cudaFree(p); });
+        if (it->second->initialize(args, ws) != cutlass::Status::kSuccess) return -36;
+        int rc = it->second->run(stream) == cutlass::Status::kSuccess ? 0 : -37;
+        return rc;
+    }
+    // kFreshObject: construct, initialize, run, destroy — nothing persists
+    {
+        Gemm gemm;
+        size_t ws_bytes = Gemm::get_workspace_size(args);
+        void* ws = nullptr;
+        if (ws_bytes && cudaMalloc(&ws, ws_bytes) != cudaSuccess) return -38;
+        if (gemm.initialize(args, ws) != cutlass::Status::kSuccess) { if (ws) cudaFree(ws); return -39; }
+        int rc = gemm.run(stream) == cutlass::Status::kSuccess ? 0 : -40;
+        if (ws) cudaFree(ws);
+        return rc;
+    }
+}
+
+struct RMVariant {
+    const char* name;
+    int (*fn)(int, int64_t, int64_t, int64_t, const void*, const void*,
+              const void*, const void*, const float*, void*, void*, float,
+              cudaStream_t);
+};
+
+const RMVariant kRMVariants[] = {
+    {"mx8out_gelu_128x128x256_c1",
+     &run_mode<VTF<Shape<_128, _128, _256>, Shape<_1, _1, _1>>>},
+    {"mx8out_gelu_128x128x256_c2x1",
+     &run_mode<VTF<Shape<_128, _128, _256>, Shape<_2, _1, _1>>>},
+    {"mx8out_gelu_128x256x256_c2x1",
+     &run_mode<VTF<Shape<_128, _256, _256>, Shape<_2, _1, _1>>>},
+    {"mx8out_gelu_128x128x128_c2x1",
+     &run_mode<VTF<Shape<_128, _128, _128>, Shape<_2, _1, _1>>>},
+};
+constexpr int kNRMVariants = int(sizeof(kRMVariants) / sizeof(kRMVariants[0]));
+
 }  // namespace
 
 extern "C" {
@@ -244,6 +366,29 @@ int64_t tfc4f_sfd_bytes(int64_t M, int64_t N) {
     auto layout = cutlass::detail::Sm1xxBlockScaledOutputConfig<32>::
         tile_atom_to_shape_SFD(cute::make_shape(int(M), int(N), 1, 1));
     return int64_t(cute::cosize(layout));
+}
+
+// R3-0 bisection: the same GEMM with per-call lifecycle variants.
+//   mode 0 = cached ensure() (the library path)
+//   mode 1 = cached object, initialize() re-run before every launch
+//   mode 2 = fresh Gemm object + fresh workspace every call
+//   mode 3 = cached object, fresh cudaMalloc'd workspace + initialize every call
+int tfc4f_gemm_mode(int variant, int mode, const void* A, const void* SA,
+                    const void* B, const void* SB, const float* bias,
+                    void* D, void* SFD,
+                    int64_t M, int64_t N, int64_t K, float alpha,
+                    cudaStream_t stream) {
+    if (variant < 0 || variant >= kNRMVariants) return -1;
+    return kRMVariants[variant].fn(mode, M, N, K, A, SA, B, SB, bias, D, SFD,
+                                   alpha, stream);
+}
+
+int64_t tfc4f_ws_bytes(int variant, int64_t M, int64_t N, int64_t K) {
+    // workspace bytes the (cached) Gemm object uses for this shape
+    using Gemm = typename VTF<Shape<_128, _128, _256>, Shape<_1, _1, _1>>::Gemm;
+    typename Gemm::GemmKernel::Arguments args{};
+    args.problem_shape = {int(M), int(N), int(K), 1};
+    return int64_t(Gemm::get_workspace_size(args));
 }
 
 int tfc4f_gemm(int variant, const void* A, const void* SA,

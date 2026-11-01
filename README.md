@@ -21,7 +21,7 @@ Measured numbers, with the box state beside them, live in
 git clone <this repo> && cd thor-fp4
 make venv          # local .venv: torch, numpy, pytest (from the wheel cache)
 make core          # build/libthorfp4_core.so — the cuBLASLt path (~40 s)
-make test          # 102 tests: bit-exactness, tolerances, verify, capture,
+make test          # 104 tests: bit-exactness, tolerances, verify, capture,
                    #            interval-certificate soundness, fused chains
 
 .venv/bin/python - <<'EOF'
@@ -225,20 +225,25 @@ CUTLASS 4.4.1 (BSD-3) is not vendored; apply
   78 % for the quantized-activation paths), not the speed path; for speed at
   M ≤ 8 the ordinary cuBLASLt engine already beats BF16 by 2.5–12×.
 
-## Fused chains (`make fused`) — experimental
+## Fused chains (`make fused`)
 
 `thor_fp4.mx8_chain(512, 1024, 1024, 64)` builds an MLP whose hidden layers
-each run as ONE kernel: the GEMM's epilogue computes `gelu(alpha·acc + bias)`
-and writes D directly as MXFP8 codes plus UE8M0 per-32 scales — the exact
-operands the next layer consumes. No standalone quantize kernels, no gelu
-kernels, no bias adds: a chain of N layers is N launches. Measured
-(BENCHMARKS.md §10): 1.9× the two-pass chain under CUDA graphs at B=256,
-up to 2.2× per layer where the quantize pass dominated, and slightly better
-top-1 (77.1 % vs 75.4 % — the epilogue gelus the f32 accumulators and its
-ceil-pow2 scales never clip a block max). Requires CUTLASS (`make fused`),
-K % 128 == 0 and N % 32 == 0. Experimental: at batches ≥ ~2048 the wrapper
-path hit scattered NaN-scale rows in this CUTLASS build (§10 has the
-evidence), so `FusedLinear` batches through 512-row slices by default.
+each run as ONE kernel: the GEMM's epilogue computes
+`gelu(alpha·acc + bias)` — the bias is the nn.Linear per-column vector,
+`D[m,n] += bias[n]` — and writes D directly as MXFP8 codes plus UE8M0
+per-32 scales, the exact operands the next layer consumes. No standalone
+quantize kernels, no gelu kernels, no bias adds: a chain of N layers is N
+launches. Measured (BENCHMARKS.md §10, M=4096 layer shapes / scorer chain):
+2.5× the two-pass mx8 chain at B=4096 (eager and CUDA-graphed), 1.1–2.6×
+per layer where the standalone quantize pass dominated, and 78.1 % of BF16
+top-1 kept on the tile scorer vs 75.4 % for the two-pass chain (the
+epilogue gelus the f32 accumulators and its ceil-pow2 scales never clip a
+block max). Requires CUTLASS (`make fused`), K % 128 == 0 and N % 32 == 0.
+Through round 2 the epilogue op read the bias per ROW (`bias[m]`), which
+for M > N read past the bias buffer and produced scattered NaN rows at
+large batches; root-caused and fixed 2026-11-01 (BENCHMARKS.md §10.5 and
+NOTES.md) — fused layers now match the nn.Linear bias contract at every
+batch size, with nonzero-bias and NaN-bait regression tests.
 
 ## Repository layout
 

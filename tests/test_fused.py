@@ -116,6 +116,68 @@ def test_fused_chain_end_to_end():
 
 
 @requires_cuda
+def test_fused_bias_semantics_nonzero():
+    """R3-0 regression: the epilogue adds the bias per output COLUMN
+    (D[m,n] += bias[n], nn.Linear semantics). Through round 2 it read
+    bias[m] — indistinguishable with the default zero bias, so this test
+    uses a large random bias: wrong semantics would give rrms ~ 1.4
+    (two independent random biases), correct ~ 0.03.
+    """
+    if _fused_lib() is None:
+        pytest.skip("needs build/libthorfp4_fused.so")
+    torch.manual_seed(3)
+    M, K, N = 256, 512, 1024
+    fl = FusedLinear(K, N, bias=True, max_chunk=0).cuda()
+    with torch.no_grad():
+        fl.bias.normal_(0.0, 1.0)
+    x = torch.randn(M, K, device="cuda")
+    got = _decode_mx8(fl(x))
+    xd = mx_fake_quant(x, "mxfp8")
+    wd = mx_fake_quant(fl.weight.detach().float(), "mxfp4")
+    ref = torch.nn.functional.gelu(xd @ wd.t() + fl.bias.float())
+    assert rrms(got, ref) < 0.1, rrms(got, ref)
+
+
+@requires_cuda
+def test_fused_no_oob_bias_read_at_large_m():
+    """R3-0 regression: at M > N the old per-row bias read ran past the
+    N-float buffer; rows whose garbage decoded as NaN came out all-NaN.
+    The bias here is a view whose trailing 8192 floats are NaN bait: any
+    out-of-bounds read shows up immediately. Direct ABI, unchunked.
+    """
+    if _fused_lib() is None:
+        pytest.skip("needs build/libthorfp4_fused.so")
+    torch.manual_seed(4)
+    M, K, N = 2048, 512, 1024
+    fl = FusedLinear(K, N, bias=True, max_chunk=0).cuda()
+    with torch.no_grad():
+        fl.bias.normal_(0.0, 0.5)
+    x = torch.randn(M, K, device="cuda")
+    from thor_fp4 import ops, _ext
+    packed = torch.zeros(ops.mx_packed_bytes(M, K, "mxfp8"), dtype=torch.uint8, device="cuda")
+    sblk = torch.zeros(ops.mx_scale_bytes(M, K), dtype=torch.uint8, device="cuda")
+    ops.quantize_mx(x, "mxfp8", packed, sblk)
+    fl._w = ops.MXTensor.from_float(fl.weight.detach().contiguous().float().cuda(), "mxfp4")
+    buf = torch.zeros(N + 8192, dtype=torch.float32, device="cuda")
+    buf[:N] = fl.bias.float()
+    buf[N:] = float("nan")          # bait directly after the bias vector
+    dp = torch.zeros(M * N, dtype=torch.uint8, device="cuda")
+    sf = torch.zeros(int(_ext.fused().tfc4f_sfd_bytes(M, N)), dtype=torch.uint8, device="cuda")
+    rc = _ext.fused().tfc4f_gemm(
+        fl.variant_idx, packed.data_ptr(), sblk.data_ptr(),
+        fl._w.packed.data_ptr(), fl._w.sblk.data_ptr(),
+        buf[:N].contiguous().data_ptr(), dp.data_ptr(), sf.data_ptr(),
+        M, N, K, 1.0, _ext.stream())
+    assert rc == 0
+    got = _decode_mx8(MX8Act(dp, sf, (M, N)))
+    assert torch.isfinite(got).all(), "NaN bait leaked in: out-of-bounds bias read"
+    xd = mx_fake_quant(x, "mxfp8")
+    wd = mx_fake_quant(fl.weight.detach().float(), "mxfp4")
+    ref = torch.nn.functional.gelu(xd @ wd.t() + fl.bias.float())
+    assert rrms(got, ref) < 0.1, rrms(got, ref)
+
+
+@requires_cuda
 def test_fused_constraints():
     if _fused_lib() is None:
         pytest.skip("needs build/libthorfp4_fused.so")
