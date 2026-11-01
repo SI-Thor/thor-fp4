@@ -208,27 +208,50 @@ CUTLASS 4.4.1 (BSD-3) is not vendored; apply
 ## Known constraints (all measured; see BENCHMARKS.md)
 
 - K must be a multiple of 64; N (= out_features) ≥ 8 and a multiple of 8.
-  M (batch) is unconstrained (1, 3, 17, 255 tested).
+  M (batch) is unconstrained (1, 3, 17, 255 tested). The CUTLASS mx8 and
+  fused engines need K % 128 == 0; the fused epilogue also needs N % 32 == 0.
 - Activation and scale buffers are padded to 128-row tiles (the kernels read
   tail tiles); the library handles this — only raw `ops` users need care.
-- Small-K layers: keep them in BF16 (`policy="auto"` does).
+- Small-K layers: keep them in BF16 (`policy="auto"` does). At small batch
+  M ≤ 8 with large N, the FP4 path wins big (2.5–12×, BENCHMARKS.md §8) —
+  including the activation-quantize pass.
 - `Linear.forward` returns a reused per-(M, dtype) buffer — `.clone()` it if
   you need it past the next call. (This is what makes chains graph-capturable.)
 - FP4 layer chains capture into CUDA graphs; eager FP4 through ctypes is
   host-launch-bound (measured in BENCHMARKS.md §batched decisions).
+- `engine="gemv"` serves M ≤ 8 only, at its measured rate (BENCHMARKS.md §8):
+  it is the QUALITY path (activations consumed exactly — 85 % top-1 kept vs
+  78 % for the quantized-activation paths), not the speed path; for speed at
+  M ≤ 8 the ordinary cuBLASLt engine already beats BF16 by 2.5–12×.
+
+## Fused chains (`make fused`)
+
+`thor_fp4.mx8_chain(512, 1024, 1024, 64)` builds an MLP whose hidden layers
+each run as ONE kernel: the GEMM's epilogue computes `gelu(alpha·acc + bias)`
+and writes D directly as MXFP8 codes plus UE8M0 per-32 scales — the exact
+operands the next layer consumes. No standalone quantize kernels, no gelu
+kernels, no bias adds: a chain of N layers is N launches. The mechanism and
+the measured saving (the quantize pass is the dominant small-K cost) are in
+BENCHMARKS.md; the epilogue's scale recipe is ceil-power-of-two vs
+`quantize_mx`'s round-to-nearest (documented there too). Requires CUTLASS
+(`make fused`), K % 128 == 0 and N % 32 == 0.
 
 ## Repository layout
 
 ```
 csrc/thor_fp4_core.cu      quantize (f32/f16/bf16), cuBLASLt GEMM (swap trick),
-                           dequantize, MX quantize — the core extension
+                           dequantize, MX quantize, register-dequant GEMV — the
+                           core extension
 csrc/cutlass_kernels.cu    our sm_110a GEMM variants (C ABI tfc4_*)
+csrc/fused_kernels.cu      the fused-epilogue chain kernels (C ABI tfc4f_*)
 csrc/bench_main.cu         standalone validation+timing for those variants
 src/thor_fp4/              the Python package (linear, quant, convert, verify,
-                           graphs, cascade, ops, _ext)
-tests/                     63 tests: bit-exactness, tolerances, pitfalls,
-                           verify injection, convert policies, QAT, capture
-benchmarks/                bench_gemm / quality / batch / cascade drivers +
+                           graphs, cascade, certify, fused, ops, _ext)
+tests/                     unit tests: bit-exactness, tolerances, pitfalls,
+                           verify injection, convert policies, QAT, capture,
+                           interval-certificate soundness
+benchmarks/                bench_gemm / quality / batch / cascade / gemv /
+                           retrieval / certify / certify2 / fused drivers +
                            bench_cutlass_suite.sh; results in benchmarks/results
 BENCHMARKS.md              every measured number with the box state beside it
 patches/                   the two-line CUTLASS 4.4.1 sm_110 enablement
