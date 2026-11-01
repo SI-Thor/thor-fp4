@@ -1,0 +1,8 @@
+.venv/
+build/
+__pycache__/
+*.pyc
+*.so
+*.o
+benchmarks/results/*.json
+.pytest_cache/
