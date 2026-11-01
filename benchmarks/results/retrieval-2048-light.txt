@@ -1,0 +1,17 @@
+# thor-fp4 bench_retrieval (DIRECTIONS.md sec.3) | load=9.51 mem_avail=114GiB
+# 1000000 entries, unit-normalized; chunk 262144; re-rank depth 64
+# truth: exact BF16 sweep. Two query regimes: RANDOM (adversarial:
+# all top scores within FP4 noise, so the top-K SET reshuffles) and
+# PLANTED (each query = a library entry + noise: the true nearest
+# neighbor is well-separated, as in real retrieval).
+
+dim 2048: resident NVFP4 library 1.15 GB (BF16 4.10 GB, 3.56x)
+  Q=  1: fp4      5.3 ms (    188 q/s)   bf16     17.6 ms (     57 q/s)   speed 3.30x   recall@1=100.00% recall@10=100.00% recall@64=84.38%
+  Q= 32: fp4      7.3 ms (   4373 q/s)   bf16     19.4 ms (   1654 q/s)   speed 2.64x   recall@1=96.88% recall@10=97.81% recall@64=76.66%
+  Q=256: fp4     28.0 ms (   9154 q/s)   bf16     42.1 ms (   6088 q/s)   speed 1.50x   recall@1=98.44% recall@10=97.42% recall@64=77.09%
+  planted (true neighbor well-separated):
+  Q=  1: top-1 finds the true entry 100.0%   in top-64: 100.0%   fp4 path      6.6 ms (    151 q/s)
+  Q= 32: top-1 finds the true entry 100.0%   in top-64: 100.0%   fp4 path      9.4 ms (   3419 q/s)
+  Q=256: top-1 finds the true entry 100.0%   in top-64: 100.0%   fp4 path     63.7 ms (   4019 q/s)
+
+# load=8.21 mem_avail=89GiB

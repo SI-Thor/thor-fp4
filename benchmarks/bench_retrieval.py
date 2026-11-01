@@ -55,13 +55,17 @@ def chunked_fp4_sweep(qt, lib, k):
     ops.quantize_nvfp4(qt.float(), 1.0, packed, sblk)
     for c0 in range(0, lib.shape[0], CHUNK):
         ce = min(CHUNK, lib.shape[0] - c0)
-        wt = lib if ce == CHUNK else ops.NVFP4Tensor(
-            lib.packed[: ops.packed_bytes(ce, D)], lib.sblk[: ops.scale_bytes(ce, D)],
+        # slice the chunk's rows out of the packed/scale buffers (views;
+        # unbounded ends keep tail-tile reads in-bounds — the next chunk's
+        # bytes are garbage but never written to this chunk's outputs)
+        wt = ops.NVFP4Tensor(
+            lib.packed[ops.packed_bytes(c0, D):],
+            lib.sblk[ops.scale_bytes(c0, D):],
             lib.tensor_scale, (ce, D))
         out = torch.empty(Q, ce, dtype=torch.float16, device="cuda")
         ops.gemm(packed, sblk, 1.0, wt.packed, wt.sblk, wt.tensor_scale,
                  out, Q, ce, D, "f16")
-        v, i = out.float().topk(k, dim=1)
+        v, i = out.topk(k, dim=1)          # native-dtype topk (the .float() cast doubles it)
         i = i + c0
         if best_v is None:
             best_v, best_i = v, i
@@ -114,7 +118,11 @@ def bench(fn, iters=5, warm=2):
 def main():
     gen = torch.Generator(device="cpu").manual_seed(1234)
     lines = [f"# thor-fp4 bench_retrieval (DIRECTIONS.md sec.3) | {boxstate()}",
-             f"# {N_ENTRIES} entries, unit-normalized; chunk {CHUNK}; re-rank depth {RERANK}; top-1 BF16 truth",
+             f"# {N_ENTRIES} entries, unit-normalized; chunk {CHUNK}; re-rank depth {RERANK}",
+             "# truth: exact BF16 sweep. Two query regimes: RANDOM (adversarial:",
+             "# all top scores within FP4 noise, so the top-K SET reshuffles) and",
+             "# PLANTED (each query = a library entry + noise: the true nearest",
+             "# neighbor is well-separated, as in real retrieval).",
              ""]
     for D in DIMS:
         lib = normalized(N_ENTRIES, D, gen=gen)
@@ -125,10 +133,21 @@ def main():
         gb4 = lib4.nbytes() / 1e9
         lines.append(f"dim {D}: resident NVFP4 library {gb4:.2f} GB "
                      f"(BF16 {libb.numel()*2/1e9:.2f} GB, {2*libb.numel()/lib4.nbytes():.2f}x)")
-        queries = {Q: normalized(Q, D, gen=gen) for Q in QUERIES}
+        queries = {}
+        for Q in QUERIES:
+            q = normalized(Q, D, gen=gen)
+            queries[Q] = q
+        # planted regime: query i = library entry pick[i] + 0.1 noise
+        picks = torch.randint(0, N_ENTRIES, (max(QUERIES),), generator=gen).cuda()
+        planted = {}
+        for Q in QUERIES:
+            base = libb[picks[:Q]].float()
+            n = torch.randn(Q, D, generator=gen).cuda()
+            pq = base + 0.1 * n / D ** 0.5
+            planted[Q] = (pq / pq.norm(dim=-1, keepdim=True)), picks[:Q]
         for Q, q in queries.items():
             qt, qb = q, q.bfloat16()
-            # FP4 path: sweep + re-rank
+
             def fp4_path():
                 v, i = chunked_fp4_sweep(qt, lib4, RERANK)
                 return rerank(qb, libb, i, RERANK)
@@ -150,6 +169,16 @@ def main():
             lines.append(f"  Q={Q:3d}: fp4 {t4*1e3:8.1f} ms ({Q/t4:7.0f} q/s)   "
                          f"bf16 {tb*1e3:8.1f} ms ({Q/tb:7.0f} q/s)   speed {tb/t4:4.2f}x   "
                          + " ".join(recalls))
+        # planted: does the FP4 sweep + BF16 re-rank find the true neighbor?
+        lines.append("  planted (true neighbor well-separated):")
+        for Q, (pq, true_idx) in planted.items():
+            pqb = pq.bfloat16()
+            v4, i4 = rerank(pqb, libb, chunked_fp4_sweep(pq, lib4, RERANK)[1], RERANK)
+            hit1 = (i4[:, 0] == true_idx).float().mean().item()
+            hit64 = (i4 == true_idx[:, None]).any(1).float().mean().item()
+            t4 = bench(lambda: rerank(pqb, libb, chunked_fp4_sweep(pq, lib4, RERANK)[1], RERANK))
+            lines.append(f"  Q={Q:3d}: top-1 finds the true entry {100*hit1:5.1f}%   "
+                         f"in top-{RERANK}: {100*hit64:5.1f}%   fp4 path {t4*1e3:8.1f} ms ({Q/t4:7.0f} q/s)")
         del lib4, libb, queries
         torch.cuda.empty_cache()
         lines.append("")
