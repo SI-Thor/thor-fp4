@@ -24,6 +24,7 @@ from .graphs import Graphed, capture_module
 from .cascade import Cascade, cascade_sweep, confidence_margin, confidence_softmax
 from .certify import (FinalLayerCertificate, IntervalChainCertificate,
                       certified_forward, certified_forward_interval)
+from .fused import FusedLinear, MX8Act, mx8_chain  # needs `make fused` at use time
 
 __all__ = [
     "Linear", "NVFP4Tensor", "MXTensor", "ops",
@@ -36,5 +37,6 @@ __all__ = [
     "Cascade", "cascade_sweep", "confidence_margin", "confidence_softmax",
     "FinalLayerCertificate", "certified_forward", "IntervalChainCertificate",
     "certified_forward_interval",
+    "FusedLinear", "MX8Act", "mx8_chain",
     "cublaslt_version", "__version__",
 ]

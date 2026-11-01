@@ -124,7 +124,7 @@ def convert(model: nn.Module, policy="auto", calibration: dict | None = None,
                 try:
                     if m.in_features % 128 != 0:
                         raise ValueError(f"K={m.in_features} not a multiple of 128")
-                    engine = f"cutlass:{resolve_mx8_variant()}"
+                    engine = f"cutlass:{resolve_mx8_variant(m.in_features)}"
                 except (RuntimeError, ValueError) as e:
                     fallback = auto_decision(m.in_features, m.out_features, table)
                     decisions[name] = f"mx8-unavailable ({e}); {fallback.spec}: {fallback.reason}"

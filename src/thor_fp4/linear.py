@@ -27,20 +27,25 @@ from .ops import NVFP4Tensor, MXTensor
 __all__ = ["Linear"]
 
 _DEFAULT_CUTLASS_VARIANTS = ["nvfp4_128x256x256_c2x1", "nvfp4_128x128x256_c1"]
-# FP8 activations x FP4 weights: preference order, first available wins
-_MX8_CUTLASS_VARIANTS = ["mxfp8xfp4_128x256x256_c2x1", "mxfp8xfp4_128x128x256_c2x1",
-                         "mxfp8xfp4_128x128x128_c2x1", "mxfp8xfp4_128x128x256_c1"]
+# FP8 activations x FP4 weights: measured winners (BENCHMARKS.md sec.3) —
+# the K-tile-128 variant at decision-model shapes (150-252 TFLOPS at
+# M=4096, K 512-5120), the wide 128x256x128 tile at big K (169-190 TFLOPS
+# at 8192^3 vs 109 for the round-1 default)
+_MX8_SMALL_K = ["mxfp8xfp4_128x128x128_c2x1", "mxfp8xfp4_128x128x256_c1"]
+_MX8_BIG_K = ["mxfp8xfp4_128x256x128_c2x1", "mxfp8xfp4_128x128x256_c1"]
 
 
-def resolve_mx8_variant() -> str:
-    """Name of the best available MXFP8-activation CUTLASS variant (for
-    engine='cutlass:mx8' and convert(policy='mx8')); ValueError if none."""
+def resolve_mx8_variant(K: int | None = None) -> str:
+    """Name of the best available MXFP8-activation CUTLASS variant for a
+    layer with in_features=K (for engine='cutlass:mx8' and
+    convert(policy='mx8')); ValueError if none."""
     from . import _ext
     L = _ext.cutlass()
     if L is None:
         raise RuntimeError("engine='cutlass:mx8' needs build/libthorfp4_cutlass.so (make cutlass)")
     names = [bytes(L.tfc4_variant_name(i)).decode() for i in range(L.tfc4_n_variants())]
-    for c in _MX8_CUTLASS_VARIANTS:
+    pref = _MX8_SMALL_K if (K is not None and K <= 2048) else _MX8_BIG_K
+    for c in pref:
         if c in names:
             return c
     for n in names:
@@ -49,7 +54,7 @@ def resolve_mx8_variant() -> str:
     raise RuntimeError("no mxfp8xfp4 variant in libthorfp4_cutlass.so")
 
 
-def _resolve_engine(engine: str):
+def _resolve_engine(engine: str, K: int | None = None):
     """'cublaslt' | 'gemv' | 'cutlass' | 'cutlass:mx8' | 'cutlass:<variant>'
     -> (kind, variant_idx).
 
@@ -69,7 +74,7 @@ def _resolve_engine(engine: str):
         name = next((c for c in _DEFAULT_CUTLASS_VARIANTS if c in names),
                     next(n for n in names if n.startswith("nvfp4_")))
     elif engine == "cutlass:mx8":
-        name = resolve_mx8_variant()
+        name = resolve_mx8_variant(K)
     elif engine.startswith("cutlass:"):
         name = engine.split(":", 1)[1]
     else:
@@ -119,7 +124,7 @@ class Linear(nn.Module):
                 f"out_features={out_features}: NVFP4 needs N >= 8 and N % 8 == 0")
         self.in_features = in_features
         self.out_features = out_features
-        self.engine_kind, self.engine_variant = _resolve_engine(engine)
+        self.engine_kind, self.engine_variant = _resolve_engine(engine, in_features)
         if self.engine_kind in ("nv", "mx8"):
             out_dtype = "bf16"          # the CUTLASS epilogues are BF16
         self.out_dtype = out_dtype
@@ -229,6 +234,24 @@ class Linear(nn.Module):
             else:
                 # MXFP8 activations x MXFP4 weights: the mix cuBLASLt refuses
                 from . import _ext
+                if hasattr(x, "packed") and hasattr(x, "sblk"):
+                    # already-packed MXFP8 (a fused.py FusedLinear output):
+                    # consume directly — no quantize pass for the chain
+                    key = (x.shape[0], "mx8act")
+                    o2 = self._act_bufs.get(key)
+                    if o2 is None:
+                        o2 = torch.empty(x.shape[0], self.out_features,
+                                         dtype=torch.bfloat16, device=x.packed.device)
+                        self._act_bufs[key] = o2
+                    rc = _ext.cutlass().tfc4_gemm(
+                        self.engine_variant, x.packed.data_ptr(), x.sblk.data_ptr(),
+                        w.packed.data_ptr(), w.sblk.data_ptr(), o2.data_ptr(),
+                        x.shape[0], self.out_features, self.in_features,
+                        1.0, _ext.stream())
+                    assert rc == 0, f"tfc4_gemm rc={rc}"
+                    if self.bias is not None:
+                        o2 += self.bias.to(o2.dtype)
+                    return o2
                 ops.quantize_mx(x, "mxfp8", packed, sblk)
                 rc = _ext.cutlass().tfc4_gemm(
                     self.engine_variant, packed.data_ptr(), sblk.data_ptr(),
