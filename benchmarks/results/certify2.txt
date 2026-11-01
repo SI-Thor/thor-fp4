@@ -1,0 +1,17 @@
+# thor-fp4 bench_certify2 (interval certificate)  cublasLt=130401  load=7.05 mem_avail=107GiB
+
+== NVFP4 acts x NVFP4 weights (cuBLASLt)
+certified share:              0.00%  (0/8192)
+sound (certified == exact): 100.0%   (must be 100)
+fp4-vs-bf16 agreement:        78.6%
+median interval bound 1386.017 vs median margin 0.103  (bound/margin median 13518.0)
+per-layer median bound:     1.200 36.630 676.676
+
+== MXFP8 acts x MXFP4 weights (CUTLASS)
+certified share:              0.00%  (0/8192)
+sound (certified == exact): 100.0%   (must be 100)
+fp4-vs-bf16 agreement:        75.4%
+median interval bound 1637.710 vs median margin 0.082  (bound/margin median 19900.0)
+per-layer median bound:     1.409 42.558 800.106
+
+# load=7.05 mem_avail=105GiB

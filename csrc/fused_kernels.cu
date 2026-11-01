@@ -140,41 +140,41 @@ int ensure(int64_t M, int64_t N, int64_t K,
     static std::map<std::tuple<int64_t, int64_t, int64_t>,
                     std::pair<std::shared_ptr<Gemm>, std::shared_ptr<void>>> cache;
     auto key = std::make_tuple(M, N, K);
+    auto mkargs = [&](const void* a, const void* sa, const void* b, const void* sb,
+                      const float* bi, void* d, void* sfd, float alpha) {
+        typename Gemm::GemmKernel::Arguments args{};
+        args.mode = cutlass::gemm::GemmUniversalMode::kGemm;
+        args.problem_shape = {int(M), int(N), int(K), 1};
+        StrideA stA = cutlass::make_cute_packed_stride(StrideA{}, {int(M), int(K), 1});
+        StrideB stB = cutlass::make_cute_packed_stride(StrideB{}, {int(N), int(K), 1});
+        auto lSFA = Gemm::GemmKernel::CollectiveMainloop::Sm1xxBlkScaledConfig::
+            tile_atom_to_shape_SFA(cute::make_shape(int(M), int(N), int(K), 1));
+        auto lSFB = Gemm::GemmKernel::CollectiveMainloop::Sm1xxBlkScaledConfig::
+            tile_atom_to_shape_SFB(cute::make_shape(int(M), int(N), int(K), 1));
+        args.mainloop = {
+            reinterpret_cast<const typename V::ElementA::DataType*>(a), stA,
+            reinterpret_cast<const typename V::ElementB::DataType*>(b), stB,
+            reinterpret_cast<const typename V::ElementA::ScaleFactorType*>(sa), lSFA,
+            reinterpret_cast<const typename V::ElementB::ScaleFactorType*>(sb), lSFB};
+        StrideC stC = cutlass::make_cute_packed_stride(StrideC{}, {int(M), int(N), 1});
+        StrideD stD = cutlass::make_cute_packed_stride(StrideD{}, {int(M), int(N), 1});
+        auto& e = args.epilogue;
+        e = {{}, nullptr, stC,
+             reinterpret_cast<typename V::ElementD::DataType*>(d), stD};
+        e.thread.alpha = alpha;
+        e.thread.bias_ptr = bi;
+        e.thread.block_scale_factor_ptr =
+            reinterpret_cast<cutlass::float_ue8m0_t*>(sfd);
+        e.thread.norm_constant_ptr = norm_one();
+        return args;
+    };
     auto it = cache.find(key);
     if (it == cache.end()) {
         auto gemm = std::make_shared<Gemm>();
         const void* dmy = (const void*)0x10000ull;
-        StrideC stC = cutlass::make_cute_packed_stride(StrideC{}, {int(M), int(N), 1});
-        auto mkargs = [&](const void* a, const void* sa, const void* b, const void* sb,
-                          const float* bi, void* d, void* sfd) {
-            typename Gemm::GemmKernel::Arguments args{};
-            args.mode = cutlass::gemm::GemmUniversalMode::kGemm;
-            args.problem_shape = {int(M), int(N), int(K), 1};
-            StrideA stA = cutlass::make_cute_packed_stride(StrideA{}, {int(M), int(K), 1});
-            StrideB stB = cutlass::make_cute_packed_stride(StrideB{}, {int(N), int(K), 1});
-            auto lSFA = Gemm::GemmKernel::CollectiveMainloop::Sm1xxBlkScaledConfig::
-                tile_atom_to_shape_SFA(cute::make_shape(int(M), int(N), int(K), 1));
-            auto lSFB = Gemm::GemmKernel::CollectiveMainloop::Sm1xxBlkScaledConfig::
-                tile_atom_to_shape_SFB(cute::make_shape(int(M), int(N), int(K), 1));
-            args.mainloop = {
-                reinterpret_cast<const typename V::ElementA::DataType*>(a), stA,
-                reinterpret_cast<const typename V::ElementB::DataType*>(b), stB,
-                reinterpret_cast<const typename V::ElementA::ScaleFactorType*>(sa), lSFA,
-                reinterpret_cast<const typename V::ElementB::ScaleFactorType*>(sb), lSFB};
-            StrideD stD = cutlass::make_cute_packed_stride(StrideD{}, {int(M), int(N), 1});
-            auto& e = args.epilogue;
-            e = {{}, nullptr, stC,
-                 reinterpret_cast<typename V::ElementD::DataType*>(d), stD};
-            e.thread.alpha = alpha;
-            e.thread.bias_ptr = bi;
-            e.thread.block_scale_factor_ptr =
-                reinterpret_cast<cutlass::float_ue8m0_t*>(sfd);
-            e.thread.norm_constant_ptr = norm_one();
-            return args;
-        };
         typename Gemm::GemmKernel::Arguments probe = mkargs(dmy, dmy, dmy, dmy,
-                                                             (const float*)dmy,
-                                                             (void*)dmy, (void*)dmy);
+                                                            (const float*)dmy,
+                                                            (void*)dmy, (void*)dmy, alpha);
         if (gemm->can_implement(probe) != cutlass::Status::kSuccess)
             return -20;
         size_t ws_bytes = Gemm::get_workspace_size(probe);
@@ -186,7 +186,7 @@ int ensure(int64_t M, int64_t N, int64_t K,
             return -22;
         it = cache.emplace(key, std::make_pair(gemm, wsg)).first;
     }
-    typename Gemm::GemmKernel::Arguments args = mkargs(A, SA, B, SB, bias, D, SFD);
+    typename Gemm::GemmKernel::Arguments args = mkargs(A, SA, B, SB, bias, D, SFD, alpha);
     if (it->second.first->update(args) != cutlass::Status::kSuccess)
         return -23;
     if (it->second.first->run(stream) != cutlass::Status::kSuccess)

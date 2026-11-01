@@ -259,7 +259,41 @@ also the faster path.
    the unsure fraction, with the threshold chosen from a measured
    recovery-vs-cost curve (`thor_fp4.cascade_sweep`).
 
-### 6a. The arithmetic certificate (`thor_fp4.certify`), measured
+### 6b. Carrying the certificate through the activations (ROUND 2), measured
+
+Round 1 §6a showed ~90 % of FP4-vs-BF16 disagreement is upstream activation
+quantization, invisible to a final-layer certificate. ROUND 2 asked for the
+bound to be carried through the activations: each quantized activation's
+error is bounded per element by its code's rounding interval against the
+block scale the kernel used (e2m1 half-grid-steps; e4m3 code exponent;
+subnormal/saturated edge cases included — the unit tests brute-force the
+intervals), propagated through Σ|δ|·|W| per layer, the erf-GELU Lipschitz
+constant (1.129, numerically verified with margin), f32 accumulation slack
+and the f16/bf16 output rounding. `IntervalChainCertificate` implements it
+(sound at scale: certified samples never disagree with the exact-arithmetic
+network in randomized tests).
+
+Measured on the same scorer (`benchmarks/results/certify2.txt`, load 7.1,
+107 GB available):
+
+| activation path | certified share | median bound | median margin | bound/margin |
+|---|---|---|---|---|
+| NVFP4 acts × NVFP4 weights | **0.00 %** (0/8192) | 1386 | 0.103 | 13,518× |
+| MXFP8 acts × MXFP4 weights | **0.00 %** (0/8192) | 1638 | 0.082 | 19,900× |
+
+The certificate is sound and the answer is plain: **coverage is zero, so the
+arithmetic-certificate direction is dropped.** The mechanism of the failure
+is the one round 1 already saw, now compounded over three layers: the
+triangle-inequality bound sums K error terms at their absolute values
+(~√K above the random-sign RMS error, per layer, multiplicatively through
+the chain), while this task's margins are ~0.1 logits. Certifying FP8
+activations does not help — the weight side of that chain (MXFP4 with
+per-32 power-of-two scales) is *coarser* than NVFP4's per-16 UE4M3, so the
+bound grows. Certificates of this form need models trained for margin and
+short depth to cover anything; the practical gate for checked FP4 decisions
+remains the learned-confidence cascade (§6: 96 % of the gap recovered).
+
+### 6a. The final-layer arithmetic certificate (`thor_fp4.certify`), measured
 
 DIRECTIONS.md §1 proposes making the escalation decision by arithmetic: the
 final layer's weight-error bound `Σ|x̂|·|W−Ŵ|` (exact per-weight errors from
