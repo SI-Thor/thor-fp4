@@ -1,0 +1,10 @@
+Metadata-Version: 2.4
+Name: thor-fp4
+Version: 0.1.0
+Summary: NVFP4 linear layers on the Jetson AGX Thor (sm_110) tensor cores
+License: MIT
+Requires-Python: >=3.10
+Description-Content-Type: text/markdown
+License-File: LICENSE
+Requires-Dist: torch>=2.4
+Dynamic: license-file
