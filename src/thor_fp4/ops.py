@@ -15,7 +15,7 @@ from . import _ext
 
 __all__ = [
     "pad_rows", "packed_bytes", "scale_bytes", "mx_packed_bytes", "mx_scale_bytes",
-    "quantize_nvfp4", "quantize_mx", "dequantize_nvfp4", "block_scales",
+    "quantize_nvfp4", "quantize_mx", "mx8_mul", "dequantize_nvfp4", "block_scales",
     "gemm", "gemv", "NVFP4Tensor", "MXTensor",
 ]
 
@@ -79,6 +79,31 @@ def quantize_mx(x: torch.Tensor, kind: str = "mxfp4",
                          0 if kind == "mxfp4" else 1,
                          packed.data_ptr(), sblk.data_ptr(), _ext.stream())
     assert rc == 0, f"tfp4_quant_mx rc={rc}"
+    return packed, sblk
+
+
+def mx8_mul(a, b, packed: torch.Tensor | None = None,
+            sblk: torch.Tensor | None = None):
+    """h = a * b for two MXFP8 tensors (MX8Act or MXTensor('mxfp8'), same
+    (R, K), K % 128 == 0): decode -> multiply -> re-encode in ONE kernel,
+    with ceil-pow2 scales (the fused epilogue's recipe — never clips a block
+    max). This is the only activation pass a fused gated (SwiGLU-class)
+    block still pays. Pass pre-allocated buffers to reuse them (e.g. inside
+    captured loops)."""
+    L = _ext.core()
+    R, K = a.shape
+    assert tuple(b.shape) == (R, K), f"mx8_mul shape mismatch {a.shape} vs {b.shape}"
+    assert K % 128 == 0, f"K={K} must be a multiple of 128 (atom alignment)"
+    if packed is None:
+        packed = torch.zeros(mx_packed_bytes(R, K, "mxfp8"), dtype=torch.uint8,
+                             device=a.packed.device)
+    if sblk is None:
+        sblk = torch.zeros(mx_scale_bytes(R, K), dtype=torch.uint8,
+                           device=a.packed.device)
+    rc = L.tfp4_mx8_mul(a.packed.data_ptr(), a.sblk.data_ptr(),
+                        b.packed.data_ptr(), b.sblk.data_ptr(),
+                        packed.data_ptr(), sblk.data_ptr(), R, K, _ext.stream())
+    assert rc == 0, f"tfp4_mx8_mul rc={rc}"
     return packed, sblk
 
 

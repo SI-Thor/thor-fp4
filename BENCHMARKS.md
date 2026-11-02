@@ -516,3 +516,79 @@ bit-identical to eager (`test_cutlass_graph_capture`,
    (all with the 512-row chunking mitigation); fused quality 77.1 % top-1
    keep.~~ Those numbers were measured through the per-row-bias read and
    with chunking; use the R3-0 table above.
+
+## 11. Fused activation quantization, accounted (R3-x, ROUND 3)
+
+1. **Hardware fact:** same as §10 — the tcgen05 epilogue can finish a
+   layer's inter-layer glue on the f32 accumulators. This section adds the
+   SwiGLU-class activations (SiLU for the gated half, Identity for the
+   un-gated half — variants `mx8out_silu_*` / `mx8out_ident_*`), a
+   one-kernel gate multiply `ops.mx8_mul` (decode → multiply → re-encode
+   with ceil-pow2 scales, so a gate product never clips a block max), and
+   the `GatedMLP` block: down( silu(gate(x)) · up(x) ), the d1/Seed-OSS
+   layer shape.
+2. **Why the two-pass path pays more:** every activation byte it moves is
+   a round trip — bf16 GEMM output write, activation read+write, quantize
+   read+write — before the next GEMM can read it. At small K those passes,
+   not the GEMM, dominate (§2).
+3. **What changed (R3-x):** `FusedLinear(act=...)`, `ops.mx8_mul`
+   (tfp4_mx8_mul in csrc/thor_fp4_core.cu), `GatedMLP`; the gate multiply
+   is the ONE pass a fused gated block still pays (a first torch-composed
+   dequant-mul-quantize measured 0.82× end-to-end — slower than two-pass —
+   before the single kernel existed; do not go back to composing it in
+   torch).
+4. **Numbers** (`benchmarks/results/fused-mlp.txt`, run of 2026-11-01,
+   load 4.4–5.2, 84–87 GiB available, **gpu_util 97–98 %** — the box was
+   fully shared; a quieter-GPU run (§10's, same code path) shows ~2×
+   better absolute µs with the same ratios, so read the ratios and the
+   GB/s as contention-lowered):
+
+   A. bytes the fused epilogue does not move (M=4096 per layer; avoided =
+      bf16 D write + activation pass + quantize read/writes):
+      | N×K | two-pass µs | fused µs | Δ µs | avoided MB | implied GB/s |
+      |---|---|---|---|---|---|
+      | 1024×512 | 1394 | 538 | 856 | 52 | 64 |
+      | 1024×1024 | 1691 | 842 | 849 | 52 | 64 |
+      | 2048×2048 | 4189 | 1777 | 2412 | 104 | 45 |
+      | 5120×1280 | 7836 | 2105 | 5731 | 261 | 48 |
+      | 1280×5120 | 4654 | 3602 | 1052 | 65 | 65 |
+
+   B. the gated block end-to-end (2048 → 2×8192 → 2048):
+      | B | two eager | two graph | fused eager | fused graph | speed e/g |
+      |---|---|---|---|---|---|
+      | 1 | 414 µs | 410 µs | 369 µs | 401 µs | 1.12× / 1.02× |
+      | 8 | 449 µs | 447 µs | 402 µs | 372 µs | 1.12× / 1.20× |
+      | 256 | 1382 µs | 1347 µs | 981 µs | 1073 µs | 1.41× / 1.26× |
+      | 4096 | 24265 µs | 24157 µs | 13032 µs | 13200 µs | **1.86× / 1.83×** |
+5. **What it makes possible:** LLM-shaped gated MLPs where the two wide
+   GEMMs emit their quantized activations straight from the epilogue and
+   the only activation pass left is the one-kernel gate multiply. The
+   NVIDIA note "+1 % on B200, where the GEMMs dominate" inverts here: on
+   the Thor's shared-memory bandwidth the fusion is the difference between
+   losing (two-pass at B=1: 414 µs) and winning.
+
+## 12. One CUDA graph per step, resident weights (R3-z, ROUND 3)
+
+1. **Hardware fact:** a kernel launch costs ~4–8 µs of host latency on
+   this box; a decision or diffusion step at small batch is a handful of
+   short kernels, so the launch share is large exactly when the compute is
+   fast.
+2. **What was measured** (the "step" here is the repo's stage-shaped
+   stand-in — the fused gated block of §11B and the scorer chain of §10;
+   no diffusion model lives in this repo, so SDXL/TRELLIS steps are NOT
+   measured):
+   - fused gated block (4 kernels: 2 GEMM epilogues, 1 gate multiply, 1
+     down GEMM), eager vs one captured graph, gpu_util 97–98 %:
+     launch overhead 9.5 % at B=1, 5.2 % at B=2, ≤1.5 % at B=4–8 — small
+     ONLY because the shared GPU inflates the kernel times ~2×; on the
+     quieter §10 run the 3-kernel scorer chain at B=1 measured 104.7 µs
+     eager vs 47.5 µs graphed — a 55 % launch share. One graph per shape
+     removes it entirely (capture_module; recapture per new M).
+   - resident weights: thor_fp4.Linear / FusedLinear cache their
+     quantized MXFP4 weights once (refresh_weight) — steady-state steps do
+     no weight quantization and no host-side pointer churn; the graph
+     replays 4 launches for the whole step.
+3. **What it makes possible:** batch-1 step latencies bounded by kernel
+   time, not launch count — the difference between 105 µs and 48 µs per
+   step for the chain, i.e. 2.2× on decision loops at B=1, with the same
+   numerics (graph replay is bit-identical; §10 tests).

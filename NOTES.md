@@ -77,3 +77,29 @@ Verification after the fix (load 10.8–16.5, 86–88 GiB available):
   1.10–2.56×; fused quality 78.1 % top-1 keep (was 77.1 % on the wrong-bias
   path) vs 75.4 % two-pass. Round-2 numbers superseded in BENCHMARKS §10.
 
+
+## 2026-11-01, R3-x + R3-z: fused activation quantization, accounted; one graph per step
+
+- R3-x additions: SiLU and Identity fused-epilogue variants
+  (`mx8out_silu_*`, `mx8out_ident_*` — Activation as a template param of
+  the variant), `ops.mx8_mul` (tfp4_mx8_mul in core: decode→mul→re-encode,
+  ceil-pow2 scales, one kernel + the scale reblock), `GatedMLP`
+  (down(silu(gate x)·up x)). 107 tests green (new: silu/ident semantics,
+  mx8_mul vs reference, gated block).
+- Measured (results/fused-mlp.txt, gpu_util 97–98 % — box fully shared; a
+  quieter run shows ~2× better absolutes with the same ratios):
+  M=4096 layers: 52–261 MB of activation traffic the fused epilogue never
+  moves, 45–65 GB/s implied at the measured Δt. Gated block 2048→2×8192→
+  2048: fused wins 1.12× (B=1) to 1.86× (B=4096) eager, 1.83× graphed.
+- Dead end recorded: the gate multiply composed in torch (dequant → mul →
+  quantize) measured 0.82× end-to-end — SLOWER than two-pass — because the
+  torch dequant is a gather-heavy multi-kernel pass. The one-kernel
+  tfp4_mx8_mul flipped the block to winning. Do not compose it in torch.
+- R3-z measured on the repo's stage stand-ins (no diffusion model in this
+  repo — said plainly in §12): fused block = 4 kernels; launch overhead
+  9.5 % (B=1) under full contention; the quiet-GPU §10 chain row is the
+  sharp datapoint: 104.7 µs eager vs 47.5 µs graphed at B=1 = 55 % launch
+  share; one graph per shape (capture_module) removes it, weights resident
+  by construction (cached MXFP4, no per-step quantization).
+- BENCHMARKS §11/§12 added; README fused section updated; scorer.boxstate
+  now records gpu_util.

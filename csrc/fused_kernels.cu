@@ -67,9 +67,12 @@ using namespace cute;
 
 namespace {
 
-// one fused variant: Tile x Cluster; A = MXFP8, B = MXFP4, D = MXFP8 codes
-// + UE8M0 scales, epilogue = bias + GELU + scale-factor generation.
-template <class Tile, class Cluster>
+// one fused variant: Tile x Cluster x Activation; A = MXFP8, B = MXFP4,
+// D = MXFP8 codes + UE8M0 scales, epilogue = bias + activation + scale-factor
+// generation. GELU serves plain MLPs; SiLU the gated (SwiGLU-class) ones;
+// Identity the un-activated halves of a gate.
+template <class Tile, class Cluster,
+          template <class> class Activation = cutlass::epilogue::thread::GELU>
 struct VTF {
     using ElementA = cutlass::mx_float8_t<cutlass::float_e4m3_t>;
     using ElementB = cutlass::mx_float4_t<cutlass::float_e2m1_t>;
@@ -88,7 +91,7 @@ struct VTF {
     // read of the N-float bias buffer — the source of the ue8m0-NaN rows
     // (BENCHMARKS sec.10 caveat; root-caused 2026-11-01, see NOTES.md).
     using FusionOperation = cutlass::epilogue::fusion::LinCombPerColBiasEltActBlockScaleFactor<
-        cutlass::epilogue::thread::GELU, 32,
+        Activation, 32,
         ElementD, float, cutlass::float_ue8m0_t,
         cutlass::layout::RowMajor,   // scalefactor layout tag (the row SF store)
         float,                       // ElementBias (fp32, like thor_fp4.Linear)
@@ -227,6 +230,20 @@ const FVariant kFVariants[] = {
      &ensure<VTF<Shape<_128, _256, _256>, Shape<_2, _1, _1>>>},
     {"mx8out_gelu_128x128x128_c2x1",
      &ensure<VTF<Shape<_128, _128, _128>, Shape<_2, _1, _1>>>},
+    // R3-x: SwiGLU-class activations — SiLU for the gated half, Identity
+    // for the un-gated half of a gate, same PerColBias/SFD epilogue.
+    {"mx8out_silu_128x128x256_c1",
+     &ensure<VTF<Shape<_128, _128, _256>, Shape<_1, _1, _1>,
+                 cutlass::epilogue::thread::SiLu>>},
+    {"mx8out_silu_128x256x256_c2x1",
+     &ensure<VTF<Shape<_128, _256, _256>, Shape<_2, _1, _1>,
+                 cutlass::epilogue::thread::SiLu>>},
+    {"mx8out_ident_128x128x256_c1",
+     &ensure<VTF<Shape<_128, _128, _256>, Shape<_1, _1, _1>,
+                 cutlass::epilogue::thread::Identity>>},
+    {"mx8out_ident_128x256x256_c2x1",
+     &ensure<VTF<Shape<_128, _256, _256>, Shape<_2, _1, _1>,
+                 cutlass::epilogue::thread::Identity>>},
 };
 constexpr int kNFVariants = int(sizeof(kFVariants) / sizeof(kFVariants[0]));
 
@@ -342,6 +359,18 @@ const RMVariant kRMVariants[] = {
      &run_mode<VTF<Shape<_128, _256, _256>, Shape<_2, _1, _1>>>},
     {"mx8out_gelu_128x128x128_c2x1",
      &run_mode<VTF<Shape<_128, _128, _128>, Shape<_2, _1, _1>>>},
+    {"mx8out_silu_128x128x256_c1",
+     &run_mode<VTF<Shape<_128, _128, _256>, Shape<_1, _1, _1>,
+                   cutlass::epilogue::thread::SiLu>>},
+    {"mx8out_silu_128x256x256_c2x1",
+     &run_mode<VTF<Shape<_128, _256, _256>, Shape<_2, _1, _1>,
+                   cutlass::epilogue::thread::SiLu>>},
+    {"mx8out_ident_128x128x256_c1",
+     &run_mode<VTF<Shape<_128, _128, _256>, Shape<_1, _1, _1>,
+                   cutlass::epilogue::thread::Identity>>},
+    {"mx8out_ident_128x256x256_c2x1",
+     &run_mode<VTF<Shape<_128, _256, _256>, Shape<_2, _1, _1>,
+                   cutlass::epilogue::thread::Identity>>},
 };
 constexpr int kNRMVariants = int(sizeof(kRMVariants) / sizeof(kRMVariants[0]));
 

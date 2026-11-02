@@ -21,7 +21,7 @@ Measured numbers, with the box state beside them, live in
 git clone <this repo> && cd thor-fp4
 make venv          # local .venv: torch, numpy, pytest (from the wheel cache)
 make core          # build/libthorfp4_core.so — the cuBLASLt path (~40 s)
-make test          # 104 tests: bit-exactness, tolerances, verify, capture,
+make test          # 107 tests: bit-exactness, tolerances, verify, capture,
                    #            interval-certificate soundness, fused chains
 
 .venv/bin/python - <<'EOF'
@@ -244,6 +244,15 @@ for M > N read past the bias buffer and produced scattered NaN rows at
 large batches; root-caused and fixed 2026-11-01 (BENCHMARKS.md §10.5 and
 NOTES.md) — fused layers now match the nn.Linear bias contract at every
 batch size, with nonzero-bias and NaN-bait regression tests.
+
+`thor_fp4.GatedMLP(d_model, d_ff)` is the SwiGLU-class block
+(`down(silu(gate(x)) * up(x))`, the d1/Seed-OSS layer shape): the two wide
+GEMMs use SiLU / Identity fused epilogues, the gate multiply is ONE kernel
+(`ops.mx8_mul`, ceil-pow2 scales), and the down projection is a BF16-out
+mx8 `Linear`. Measured at 2048 → 2×8192 → 2048 (BENCHMARKS.md §11):
+1.1× at B=1 up to **1.86× at B=4096** vs the two-pass equivalent on a
+fully-shared GPU (gpu_util 98 %), with 45–65 GB/s of activation traffic
+the fused path never moves at the M=4096 layer shapes.
 
 ## Repository layout
 

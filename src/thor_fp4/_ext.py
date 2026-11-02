@@ -52,6 +52,9 @@ def _decl_core(L):
     L.tfp4_quant.restype = ctypes.c_int
     L.tfp4_quant_mx.argtypes = [c_void, i64, i64, ctypes.c_int, ctypes.c_int, c_void, c_void, c_void]
     L.tfp4_quant_mx.restype = ctypes.c_int
+    L.tfp4_mx8_mul.argtypes = [c_void, c_void, c_void, c_void, c_void, c_void,
+                               i64, i64, c_void]
+    L.tfp4_mx8_mul.restype = ctypes.c_int
     L.tfp4_gemm.argtypes = [c_void, c_void, ctypes.c_float, c_void, c_void, ctypes.c_float,
                             c_void, i64, i64, i64, ctypes.c_int, c_void]
     L.tfp4_gemm.restype = ctypes.c_int

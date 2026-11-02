@@ -28,7 +28,7 @@ import torch.nn as nn
 from . import _ext, ops
 from .linear import Linear
 
-__all__ = ["MX8Act", "FusedLinear", "mx8_chain"]
+__all__ = ["MX8Act", "FusedLinear", "GatedMLP", "mx8_chain"]
 
 
 class MX8Act:
@@ -42,6 +42,27 @@ class MX8Act:
     def nbytes(self) -> int:
         M, K = self.shape
         return M * (K + K // 32)
+
+    def dequant(self) -> torch.Tensor:
+        """-> f32 (M, K); the tcgen05 scale-tile atom un-scattered in torch."""
+        M, K = self.shape
+        S = K // 32
+        assert S % 4 == 0, "dequant assumes K/32 % 4 == 0"
+        f8 = self.packed[: M * K].view(M, K).view(torch.float8_e4m3fn).float()
+        idx = torch.arange(M, device=self.packed.device)
+        a = idx // 128
+        r = idx % 128
+        b = r // 32
+        c = r % 32
+        sidx = torch.arange(S, device=self.packed.device)
+        d = sidx // 4
+        e = sidx % 4
+        lin = (a[:, None] * (S // 4) + d[None, :]) * 512 + 16 * c[:, None] \
+            + 4 * b[:, None] + e[None, :]
+        sbf = self.sblk.view(-1)[lin.reshape(-1)].view(M, S)
+        sf = torch.ldexp(torch.ones_like(sbf, dtype=torch.float32),
+                         (sbf.to(torch.int16) - 127))
+        return (f8.view(M, S, 32) * sf.unsqueeze(-1)).reshape(M, K)
 
     def rows(self, a: int, b: int) -> "MX8Act":
         """Rows [a, b) as an MX8Act of view buffers. Both packed codes (K
@@ -73,22 +94,26 @@ class FusedLinear(nn.Module):
     for the bisection and BENCHMARKS.md §10 for the corrected numbers."""
 
     def __init__(self, in_features: int, out_features: int, bias: bool = True,
-                 variant: str | None = None, device=None, max_chunk: int = 0):
+                 variant: str | None = None, device=None, max_chunk: int = 0,
+                 act: str = "gelu"):
         super().__init__()
         if in_features % 128 != 0:
             raise ValueError(f"in_features={in_features}: the fused epilogue needs K % 128 == 0")
         if out_features % 32 != 0:
             raise ValueError(f"out_features={out_features}: the SF store needs N % 32 == 0")
+        if act not in ("gelu", "silu", "ident"):
+            raise ValueError(f"act={act!r}: pick 'gelu' | 'silu' | 'ident'")
         L = _ext.fused()
         if L is None:
             raise RuntimeError("FusedLinear needs build/libthorfp4_fused.so (make fused)")
         if variant is None:
             names = [bytes(L.tfc4f_variant_name(i)).decode() for i in range(L.tfc4f_n_variants())]
-            variant = next((n for n in names if "128x128x256" in n), names[0])
+            variant = next((n for n in names if n.startswith(f"mx8out_{act}_128x128x256")),
+                           names[0])
         self.variant_idx = L.tfc4f_variant_index(variant.encode())
         if self.variant_idx < 0:
             raise ValueError(f"unknown fused variant {variant!r}")
-        self.variant = variant
+        self.variant, self.act = variant, act
         self.in_features, self.out_features = in_features, out_features
         self.weight = nn.Parameter(torch.empty(out_features, in_features, device=device))
         if bias:
@@ -168,7 +193,43 @@ class FusedLinear(nn.Module):
 
     def extra_repr(self) -> str:
         return (f"in={self.in_features}, out={self.out_features}, bias={self.bias is not None}, "
-                f"variant={self.variant}")
+                f"variant={self.variant}, act={self.act}")
+
+
+class GatedMLP(nn.Module):
+    """A SwiGLU-class MLP block — down( silu(gate(x)) * up(x) ) — the
+    d1/Seed-OSS layer shape. Both wide GEMMs quantize their activations in
+    the epilogue (gate with SiLU, up with Identity); the gate multiply runs
+    as ONE kernel (ops.mx8_mul: decode->mul->re-encode, ceil-pow2 scales);
+    the down projection is a thor_fp4.Linear on the CUTLASS mx8 engine
+    (BF16 out). Needs d_model % 128 == 0 and d_ff % 32 == 0."""
+
+    def __init__(self, d_model: int, d_ff: int, device=None):
+        super().__init__()
+        self.gate = FusedLinear(d_model, d_ff, bias=True, act="silu", device=device)
+        self.up = FusedLinear(d_model, d_ff, bias=True, act="ident", device=device)
+        self.down = Linear(d_ff, d_model, bias=True, engine="cutlass:mx8").to(device)
+        self._h: dict[int, MX8Act] = {}
+
+    def _apply(self, fn, recurse=True):
+        self._h = {}
+        return super()._apply(fn, recurse)
+
+    def forward(self, x):
+        with torch.no_grad():
+            g = self.gate(x)
+            u = self.up(x)
+            M = g.shape[0]
+            h = self._h.get(M)
+            if h is None:
+                packed = torch.zeros(ops.mx_packed_bytes(M, g.shape[1], "mxfp8"),
+                                     dtype=torch.uint8, device=g.packed.device)
+                sblk = torch.zeros(ops.mx_scale_bytes(M, g.shape[1]),
+                                   dtype=torch.uint8, device=g.packed.device)
+                h = MX8Act(packed, sblk, g.shape)
+                self._h[M] = h
+            ops.mx8_mul(g, u, h.packed, h.sblk)
+            return self.down(h)
 
 
 def mx8_chain(*dims: int, variant: str | None = None, device=None) -> nn.Sequential:

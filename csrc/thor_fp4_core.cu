@@ -37,6 +37,8 @@
 //   tfp4_cublaslt_version()
 //   tfp4_quant(x, R, K, in_dtype, ts, packed, sblk, stream)
 //   tfp4_quant_mx(x, R, K, in_dtype, kind, packed, sblk, stream)
+//   tfp4_mx8_mul(pA, sA, pB, sB, pOut, sOut, R, K, stream)  MXFP8 h = a*b
+//                                          (ceil-pow2 scales; K % 128 == 0)
 //   tfp4_gemm(pA, sA, tsA, pB, sB, tsB, out, M, N, K, out_dtype, stream)
 //   tfp4_gemv(x, M, K, in_dtype, pB, sB, tsB, out, N, out_dtype, stream)
 //   tfp4_dequant_f32(packed, sblk, ts, R, K, out, stream)
@@ -595,6 +597,79 @@ int tfp4_quant_mx(const void* x, int64_t R, int64_t K, int in_dtype, int kind,
     CK(cudaGetLastError());
     reblock_scales_ue8m0<<<(unsigned)((R * ((S + 15) / 16) + 255) / 256), 256, 0, stream>>>(
         g_sflat, sblk, R, S);
+    CK(cudaGetLastError());
+    return 0;
+}
+
+// ---------------------------------------------------------------------------
+// MXFP8 elementwise multiply, h = a * b, for the gated (SwiGLU-class)
+// blocks: one thread per (row, 32-block) decodes both operands (e4m3 codes
+// x UE8M0 tile-layout scales), multiplies, and re-encodes with a
+// CEIL-power-of-two scale — the fused epilogue's recipe, so the gate
+// multiply never clips a block max either. One kernel + the scale reblock;
+// this is the only pass over the activations a fused gated block still pays.
+// ---------------------------------------------------------------------------
+__device__ __forceinline__ uint8_t ue8m0_enc_ceil(float v) {
+    if (!(v > 0.f)) return 0;
+    int e; frexpf(v, &e);                       // v = m * 2^e, m in [0.5, 1)
+    int code = (v == ldexpf(1.f, e - 1)) ? (e - 1) : e;   // ceil(log2 v)
+    if (code < -127) code = -127;
+    if (code > 127) code = 127;
+    return (uint8_t)(code + 127);
+}
+
+__global__ void mx8_mul(const uint8_t* __restrict__ ap, const uint8_t* __restrict__ as,
+                        const uint8_t* __restrict__ bp, const uint8_t* __restrict__ bs,
+                        uint8_t* __restrict__ op, float* __restrict__ oflat, int64_t K) {
+    int64_t r = blockIdx.x;
+    int64_t S = K / 32;
+    int64_t seg = blockIdx.y, segs = gridDim.y;
+    int64_t per = (S + segs - 1) / segs;
+    int64_t s0 = seg * per, s1 = min(S, s0 + per);
+    int64_t D = S / 4;                          // scale atoms along N
+    const uint8_t* arow = ap + r * K;
+    const uint8_t* brow = bp + r * K;
+    uint8_t* orow = op + r * K;
+    int64_t atom_r = (r / 128) * D;
+    int rb = (r % 128) / 32, rc = r % 32;
+    for (int64_t s = s0 + threadIdx.x; s < s1; s += blockDim.x) {
+        float fa = ldexpf(1.f, (int)as[(atom_r + s / 4) * 512 + 16 * rc + 4 * rb + (s % 4)] - 127);
+        float fb = ldexpf(1.f, (int)bs[(atom_r + s / 4) * 512 + 16 * rc + 4 * rb + (s % 4)] - 127);
+        float f[32];
+        float amax = 0.f;
+#pragma unroll
+        for (int i = 0; i < 32; ++i) {
+            f[i] = e4m3_dec(arow[s * 32 + i]) * fa * e4m3_dec(brow[s * 32 + i]) * fb;
+            amax = fmaxf(amax, fabsf(f[i]));
+        }
+        uint8_t scb = ue8m0_enc_ceil(amax * (1.0f / 448.0f));
+        float ds = ldexpf(1.f, (int)scb - 127);
+        oflat[r * S + s] = ds;
+        uint8_t* dst = orow + s * 32;
+#pragma unroll
+        for (int i = 0; i < 32; ++i) dst[i] = e4m3_enc(f[i] / ds);
+    }
+}
+
+// h = a * b for MXFP8 tile-layout tensors (R, K). K % 128 == 0 (the fused
+// epilogue's constraint), so S = K/32 is a multiple of 4 and the atom
+// gather above is exact.
+int tfp4_mx8_mul(const void* ap, const void* as, const void* bp, const void* bs,
+                 void* op, void* os, int64_t R, int64_t K, cudaStream_t stream) {
+    if ((K % 128) != 0) { fprintf(stderr, "thor_fp4: mx8_mul needs K %% 128 == 0 (got %ld)\n", (long)K); return -3; }
+    std::lock_guard<std::mutex> lk(g_mu);
+    int rc = ensure_sflat((size_t)R * (K / 32));
+    if (rc) return rc;
+    int64_t S = K / 32;
+    int threads = (int)std::min<int64_t>(S < 512 ? S : 512, 512);
+    int segs = (int)std::min<int64_t>((S + threads - 1) / threads, std::max<int64_t>(1, 512 / (R + 1) + 1));
+    dim3 grid((unsigned)R, (unsigned)segs);
+    mx8_mul<<<grid, threads, 0, stream>>>(
+        (const uint8_t*)ap, (const uint8_t*)as, (const uint8_t*)bp, (const uint8_t*)bs,
+        (uint8_t*)op, g_sflat, K);
+    CK(cudaGetLastError());
+    reblock_scales_ue8m0<<<(unsigned)((R * ((S + 15) / 16) + 255) / 256), 256, 0, stream>>>(
+        g_sflat, (uint8_t*)os, R, S);
     CK(cudaGetLastError());
     return 0;
 }

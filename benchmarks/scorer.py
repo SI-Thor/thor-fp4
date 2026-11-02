@@ -18,7 +18,14 @@ RESULTS = Path(__file__).resolve().parent / "results"
 def boxstate() -> str:
     load = open("/proc/loadavg").read().split()[0]
     avail = int([l for l in open("/proc/meminfo") if l.startswith("MemAvailable")][0].split()[1]) / 2**20
-    return f"load={load} mem_avail={avail:.0f}GiB"
+    try:
+        import subprocess as _sp
+        gpu = _sp.run(["nvidia-smi", "--query-gpu=utilization.gpu",
+                       "--format=csv,noheader"], capture_output=True, text=True
+                      ).stdout.strip()
+    except Exception:
+        gpu = "?"
+    return f"load={load} mem_avail={avail:.0f}GiB gpu_util={gpu}"
 
 
 def make_teacher(seed=123):

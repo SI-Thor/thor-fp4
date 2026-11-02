@@ -16,7 +16,7 @@ import torch.nn as nn
 
 import thor_fp4
 from thor_fp4 import ops
-from thor_fp4.fused import FusedLinear, MX8Act, mx8_chain
+from thor_fp4.fused import FusedLinear, GatedMLP, MX8Act, mx8_chain
 from thor_fp4.quant import mx_fake_quant
 from conftest import requires_cuda, rrms
 
@@ -175,6 +175,59 @@ def test_fused_no_oob_bias_read_at_large_m():
     wd = mx_fake_quant(fl.weight.detach().float(), "mxfp4")
     ref = torch.nn.functional.gelu(xd @ wd.t() + fl.bias.float())
     assert rrms(got, ref) < 0.1, rrms(got, ref)
+
+
+@requires_cuda
+def test_fused_activations_silu_ident():
+    """R3-x: the SwiGLU-class epilogue activations — SiLU for the gated
+    half, Identity for the un-gated half — with a nonzero per-column bias."""
+    if _fused_lib() is None:
+        pytest.skip("needs build/libthorfp4_fused.so")
+    torch.manual_seed(5)
+    M, K, N = 256, 512, 1024
+    for act, fn in (("silu", torch.nn.functional.silu), ("ident", lambda t: t)):
+        fl = FusedLinear(K, N, bias=True, act=act).cuda()
+        with torch.no_grad():
+            fl.bias.normal_(0.0, 0.5)
+        x = torch.randn(M, K, device="cuda")
+        got = _decode_mx8(fl(x))
+        xd = mx_fake_quant(x, "mxfp8")
+        wd = mx_fake_quant(fl.weight.detach().float(), "mxfp4")
+        ref = fn(xd @ wd.t() + fl.bias.float())
+        assert rrms(got, ref) < 0.1, (act, rrms(got, ref))
+
+
+@requires_cuda
+def test_mx8_mul_matches_reference():
+    """R3-x: the one-kernel gate multiply h = a*b (ceil-pow2 scales) vs the
+    dequantised reference re-quantized with the same recipe."""
+    torch.manual_seed(7)
+    from thor_fp4 import ops
+    from thor_fp4.fused import MX8Act
+    from thor_fp4.quant import mx_fake_quant
+    M, K = 256, 512
+    a = mx_fake_quant(torch.randn(M, K, device="cuda"), "mxfp8")
+    b = mx_fake_quant(torch.randn(M, K, device="cuda"), "mxfp8")
+    pa, sa = ops.quantize_mx(a, "mxfp8")
+    pb, sb = ops.quantize_mx(b, "mxfp8")
+    po, so = ops.mx8_mul(MX8Act(pa, sa, (M, K)), MX8Act(pb, sb, (M, K)))
+    got = MX8Act(po, so, (M, K)).dequant()
+    ref = a * b
+    assert rrms(got, ref) < 0.05, rrms(got, ref)
+
+
+@requires_cuda
+def test_gated_mlp_block():
+    """R3-x: the SwiGLU-class block (gate SiLU + up Identity in the
+    epilogues, one mul kernel, BF16 down projection)."""
+    if _fused_lib() is None:
+        pytest.skip("needs build/libthorfp4_fused.so")
+    torch.manual_seed(6)
+    m = GatedMLP(256, 512).cuda()
+    x = torch.randn(64, 256, device="cuda")
+    y = m(x)
+    assert y.shape == (64, 256) and y.dtype == torch.bfloat16
+    assert torch.isfinite(y.float()).all()
 
 
 @requires_cuda
