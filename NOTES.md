@@ -103,3 +103,19 @@ Verification after the fix (load 10.8–16.5, 86–88 GiB available):
   by construction (cached MXFP4, no per-step quantization).
 - BENCHMARKS §11/§12 added; README fused section updated; scorer.boxstate
   now records gpu_util.
+
+## 2026-11-01, round-3 close-out
+
+- R3-0 done (3a386e8), R3-x done (18c4cbb), R3-z measured and documented
+  (sec.12).
+- R3-y (dense-then-sparse denoising for SDXL/FLUX) NOT attempted: the
+  models live on the cold shelf under other seats' projects (GLiDE is
+  served by coldshelf-bakeoff), and the block-sparse attention work it
+  needs is a multi-day build; the round-3 order made it conditional on
+  time. A future round needs: the cold-shelf FLUX/SDXL checkpoints, an
+  LPIPS/CLIP scorer, and a block-sparse attention kernel to compare
+  against dense.
+- The round-3 candidate list beyond the ordered items (pow2-restricted
+  scales, L2 persistence for hot weights, persistent dispatch vs CUDA
+  graphs, 2:4 sparse block-scaled FP4, precision keyframes) was not
+  ordered for this round and remains open.
